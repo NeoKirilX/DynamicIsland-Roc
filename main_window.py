@@ -38,7 +38,7 @@ from equalizer import Equalizer
 from goo import Goo
 from headset import get_headset_charge
 from icon import Glyph, render_battery, render_icon
-from lyric import LyricLine, select_font
+from lyric import LyricLine, measure_text, select_font
 from lyrics_service import LyricsService
 from media_service import MediaService
 from native_wayland import is_ctrl_down, is_fullscreen
@@ -136,6 +136,11 @@ LYRIC_INSET = 77.0
 LYRIC_EDGE = 8.0
 PLAYER_HEIGHT = 176.0
 PLAYER_LYRIC_ROOM = 74.0
+PLAYER_LYRIC_GAP = 4.0
+PLAYER_LYRIC_PAD = 8.0
+LYRIC_COMPACT_FONT = 13.0
+PLAYER_LYRIC_FONT = 14.0
+LYRIC_SPEED = 36.0
 COLLAPSE_DELAY_SEC = 0.55
 BUBBLE_LINGER_SEC = 2.5
 AWAY_FOR_SEC = 5.0
@@ -318,6 +323,7 @@ class MainWindow(Gtk.Window):
         self.area.set_draw_func(self.on_draw)
         self.set_child(self.area)
 
+        self._ready = False
         self._media = MediaService(on_changed=self.on_media_changed)
         self._lyrics = LyricsService()
         self._lyrics.add_callback(self.update_lyric)
@@ -433,6 +439,11 @@ class MainWindow(Gtk.Window):
         self._clock_date_str = ""
         self._media_width = MEDIA_WIDTH
         self._player_room = False
+        self._player_lyric_h = PLAYER_LYRIC_ROOM
+        self._lyric_scroll = 0.0
+        self._lyric_overflow = 0.0
+        self._lyric_span = 0.0
+        self._lyric_line_start = 0.0
         self._skip_direction = 1
         self._skip_at = -SKIP_MEMORY
         self._source_at = -SKIP_MEMORY
@@ -455,6 +466,9 @@ class MainWindow(Gtk.Window):
 
         self._tick_cb_id = self.area.add_tick_callback(self.on_frame_tick)
         GLib.timeout_add(100, self.on_periodic_tick)
+
+        self._ready = True
+        GLib.idle_add(self._initial_media_sync, None)
 
         self.update_clock()
         self.sync_accent()
@@ -989,7 +1003,7 @@ class MainWindow(Gtk.Window):
         if view == View.MEDIA:
             return d.with_w(self._media_width)
         if view == View.MEDIA_BIG and self._player_room:
-            return d.with_h(PLAYER_HEIGHT + PLAYER_LYRIC_ROOM)
+            return d.with_h(PLAYER_HEIGHT + self._player_lyric_h)
         return d
 
     def set_targets(self) -> None:
@@ -1102,6 +1116,9 @@ class MainWindow(Gtk.Window):
             )
             moving |= self._seek_x.advance(dt)
             moving |= self._seek_h.advance(dt)
+
+        if self._current_view == View.MEDIA and self._lyric_overflow > 0.0 and Settings.lyrics:
+            moving |= self._advance_lyric_scroll(dt)
 
         if self._current_view in (View.MEDIA, View.TOAST, View.MEDIA_BIG):
             bands = self._spectrum.get_bands()
@@ -1321,7 +1338,7 @@ class MainWindow(Gtk.Window):
             self.notify(Glyph.Headphones, COLOR_RED, "Низкий заряд", f"Наушники · {level}%")
 
     def on_network_changed(self, was: State, now: State) -> None:
-        if not Settings.network:
+        if not self._ready or not Settings.network:
             return
         if now.vpn != was.vpn:
             if now.vpn:
@@ -1341,10 +1358,21 @@ class MainWindow(Gtk.Window):
         else:
             self.notify(Glyph.Wifi if wifi else Glyph.Wired, COLOR_ORANGE, title, "Без доступа к интернету")
 
+    def _initial_media_sync(self, _data: object = None) -> bool:
+        self.on_media_changed()
+        return False
+
     def on_media_changed(self) -> None:
+        if not self._ready:
+            return
+
         title = self._media.title if self._media.has_track else ""
         new_track = bool(title and title != self._last_track_key)
         self._last_track_key = title
+
+        if new_track:
+            self._player_lyric_h = PLAYER_LYRIC_ROOM
+            self._lyric_scroll = 0.0
 
         asked = time.monotonic() - self._source_at < SKIP_MEMORY
         source = self._media.source
@@ -1394,21 +1422,57 @@ class MainWindow(Gtk.Window):
             return
 
         lines = self._lyrics.for_duration(self._media.duration)
-        _, current_line = self._lyrics.get_current_line(self._media.position, self._media.duration, lead=0.2)
+        idx, current_line = self._lyrics.get_current_line(self._media.position, self._media.duration, lead=0.2)
         text = current_line[1] if current_line else (self._media.title if self._media.has_track else "")
 
         if text != self._last_lyric_text or snap:
             self._last_lyric_text = text
             if text:
-                select_font(_MEASURE_CR, font_size=12.0, bold=False)
-                tw = _MEASURE_CR.text_extents(text).width
-                self._media_width = max(MEDIA_WIDTH, min(MEDIA_MAX_WIDTH, tw + 2 * LYRIC_EDGE + LYRIC_INSET))
+                select_font(_MEASURE_CR, font_size=LYRIC_COMPACT_FONT, bold=True)
+                tw = _MEASURE_CR.text_extents(text).x_advance
+                self._lyric_span = 0.0
+                self._lyric_line_start = 0.0
+                if idx >= 0 and idx < len(lines):
+                    self._lyric_line_start = lines[idx][0]
+                    if idx + 1 < len(lines):
+                        self._lyric_span = max(0.3, lines[idx + 1][0] - lines[idx][0])
+                self._media_width = max(
+                    MEDIA_WIDTH,
+                    min(MEDIA_MAX_WIDTH, tw + 2 * LYRIC_EDGE + LYRIC_INSET + 2.0),
+                )
+                box = self._media_width - LYRIC_INSET
+                self._lyric_overflow = max(0.0, tw - (box - 2 * LYRIC_EDGE))
             else:
                 self._media_width = MEDIA_WIDTH
+                self._lyric_span = 0.0
+                self._lyric_line_start = 0.0
+                self._lyric_overflow = 0.0
+
+            self._lyric_scroll = 0.0
 
             if not snap:
                 self._w.tune(280, 30)
             self.set_targets()
+
+    def _advance_lyric_scroll(self, dt: float) -> bool:
+        span = self._lyric_span if self._lyric_span > 0.0 else 3.0
+        elapsed = max(0.0, min(span, self._media.position - self._lyric_line_start))
+        hold = min(0.6, span * 0.2)
+        run = min(self._lyric_overflow / LYRIC_SPEED, max(span - hold - 0.5, 0.6))
+        if elapsed <= hold:
+            target = 0.0
+        else:
+            k = min(1.0, max(0.0, (elapsed - hold) / run))
+            target = -self._lyric_overflow * (0.5 - 0.5 * math.cos(math.pi * k))
+
+        if abs(target - self._lyric_scroll) < 0.05:
+            if self._lyric_scroll != target:
+                self._lyric_scroll = target
+                return True
+            return False
+
+        self._lyric_scroll += (target - self._lyric_scroll) * min(1.0, dt * 14.0)
+        return True
 
     def update_player_lyric(self, snap: bool = False) -> None:
         lines = self._lyrics.for_duration(self._media.duration)
@@ -1677,14 +1741,24 @@ class MainWindow(Gtk.Window):
             lyric_text = current_line[1] if has_lyric else self._media.title
 
             if has_lyric and Settings.lyrics:
-                LyricLine.render_compact(cr, lyric_text, mid_x, py, mid_w, COLOR_WHITE, h=ph)
+                LyricLine.render_compact(
+                    cr,
+                    lyric_text,
+                    mid_x,
+                    py,
+                    mid_w,
+                    COLOR_WHITE,
+                    font_size=LYRIC_COMPACT_FONT,
+                    offset_x=self._lyric_scroll,
+                    h=ph,
+                )
             else:
                 draw_text(
                     cr,
                     lyric_text,
                     mid_x + mid_w / 2.0,
                     py + ph / 2.0,
-                    font_size=12.0,
+                    font_size=LYRIC_COMPACT_FONT,
                     bold=True,
                     color=COLOR_DIM[:3] if has_lyric else COLOR_WHITE,
                     alpha=alpha,
@@ -1940,7 +2014,7 @@ class MainWindow(Gtk.Window):
         if self._player_room:
             lyric_y = py + 92.0
             lyric_w = 340.0
-            lyric_h = 70.0
+            lyric_h = self._player_lyric_h
             lines = self._lyrics.for_duration(self._media.duration)
             idx, curr = self._lyrics.get_current_line(self._media.position, self._media.duration, lead=0.2)
             if lines and idx >= 0:
@@ -1948,15 +2022,46 @@ class MainWindow(Gtk.Window):
                 curr_text = curr[1] if curr else ""
                 next_text = lines[idx + 1][1] if idx + 1 < len(lines) else ""
 
-                if prev_text:
-                    draw_text(cr, prev_text, px + pw / 2.0, lyric_y + 12.0, font_size=12.0, bold=False, color=COLOR_DIM[:3], alpha=0.4 * alpha, align="center", max_w=lyric_w)
+                prog = 0.0
                 if curr_text:
                     start_t = lines[idx][0]
                     end_t = lines[idx + 1][0] if idx + 1 < len(lines) else self._media.duration
                     prog = max(0.0, min(1.0, (self._media.position + 0.2 - start_t) / max(0.5, end_t - start_t)))
-                    LyricLine.render_karaoke(cr, curr_text, prog, px + (pw - lyric_w) / 2.0, lyric_y + 26.0, lyric_w, font_size=14.0, is_active=True)
+
+                h_prev = measure_text(_MEASURE_CR, prev_text, lyric_w, PLAYER_LYRIC_FONT, False)[1] if prev_text else 0.0
+                h_curr = measure_text(_MEASURE_CR, curr_text, lyric_w, PLAYER_LYRIC_FONT, True)[1] if curr_text else 0.0
+                h_next = measure_text(_MEASURE_CR, next_text, lyric_w, PLAYER_LYRIC_FONT, False)[1] if next_text else 0.0
+
+                rows = sum(1 for h in (h_prev, h_curr, h_next) if h > 0.0)
+                stack_h = h_prev + h_curr + h_next + PLAYER_LYRIC_GAP * max(0, rows - 1)
+                needed = max(self._player_lyric_h, stack_h + 2 * PLAYER_LYRIC_PAD, PLAYER_LYRIC_ROOM)
+                if needed - self._player_lyric_h > 0.5:
+                    self._player_lyric_h = needed
+                    self._h.tune(280, 30)
+                    self.set_targets()
+
+                lyric_x = px + (pw - lyric_w) / 2.0
+                cursor = lyric_y + max(0.0, (lyric_h - stack_h) / 2.0)
+
+                if prev_text:
+                    LyricLine.render_karaoke(
+                        cr, prev_text, prog, lyric_x, cursor, lyric_w, h_prev,
+                        font_size=PLAYER_LYRIC_FONT, is_active=False, alpha=alpha,
+                    )
+                    cursor += h_prev + PLAYER_LYRIC_GAP
+
+                if curr_text:
+                    LyricLine.render_karaoke(
+                        cr, curr_text, prog, lyric_x, cursor, lyric_w, h_curr,
+                        font_size=PLAYER_LYRIC_FONT, is_active=True, alpha=alpha,
+                    )
+                    cursor += h_curr + PLAYER_LYRIC_GAP
+
                 if next_text:
-                    draw_text(cr, next_text, px + pw / 2.0, lyric_y + 54.0, font_size=12.0, bold=False, color=COLOR_DIM[:3], alpha=0.4 * alpha, align="center", max_w=lyric_w)
+                    LyricLine.render_karaoke(
+                        cr, next_text, prog, lyric_x, cursor, lyric_w, h_next,
+                        font_size=PLAYER_LYRIC_FONT, is_active=False, alpha=alpha,
+                    )
 
         dur = self._media.duration
         known_dur = dur >= 1.0

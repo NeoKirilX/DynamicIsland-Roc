@@ -105,6 +105,21 @@ def layout_lines(
 
     return lines
 
+def measure_text(
+    cr: cairo.Context,
+    text: str,
+    max_w: float,
+    font_size: float = FONT_SIZE,
+    is_active: bool = True,
+) -> tuple[float, float]:
+    eff_font = font_size if is_active else font_size * SCALE
+    select_font(cr, font_size=eff_font, bold=is_active)
+    line_h = eff_font * (LINE_HEIGHT / FONT_SIZE)
+    rows = layout_lines(cr, text.strip() or "♪", max_w=max_w, max_lines=MAX_LINES)
+    rows_count = max(1, len(rows))
+    max_row_w = max((adv for _, adv in rows), default=0.0)
+    return (max_row_w, rows_count * line_h)
+
 class LyricLine:
 
     def __init__(
@@ -140,13 +155,7 @@ class LyricLine:
         font_size: float = FONT_SIZE,
         is_active: bool = True,
     ) -> tuple[float, float]:
-        eff_font = font_size if is_active else font_size * SCALE
-        select_font(cr, font_size=eff_font, bold=is_active)
-        line_h = eff_font * (LINE_HEIGHT / FONT_SIZE)
-        rows = layout_lines(cr, self.text or "♪", max_w=max_w, max_lines=MAX_LINES)
-        rows_count = max(1, len(rows))
-        max_row_w = max((adv for _, adv in rows), default=0.0)
-        return (max_row_w, rows_count * line_h)
+        return measure_text(cr, self.text or "♪", max_w, font_size, is_active)
 
     def render_compact(
         self_or_cls,
@@ -268,6 +277,7 @@ class LyricLine:
             is_active = bool(kwargs.get("is_active", True))
 
         display_text = text if text.strip() else "♪"
+        alpha: float = float(kwargs.get("alpha", 1.0))
 
         if not is_active:
             eff_font = font_size * SCALE
@@ -289,7 +299,7 @@ class LyricLine:
                 cr.save()
                 cr.rectangle(x, row_y, w, line_h)
                 cr.clip()
-                cr.set_source_rgba(1.0, 1.0, 1.0, DIM)
+                cr.set_source_rgba(1.0, 1.0, 1.0, DIM * alpha)
                 cr.move_to(row_x, baseline)
                 cr.show_text(row_str)
                 cr.restore()
@@ -331,8 +341,8 @@ class LyricLine:
             text_group = cr.pop_group()
 
             grad = cairo.LinearGradient(row_x + from_x, 0.0, row_x + from_x + EDGE, 0.0)
-            grad.add_color_stop_rgba(0.0, 1.0, 1.0, 1.0, 1.0)
-            grad.add_color_stop_rgba(1.0, 1.0, 1.0, 1.0, unsung_opacity)
+            grad.add_color_stop_rgba(0.0, 1.0, 1.0, 1.0, alpha)
+            grad.add_color_stop_rgba(1.0, 1.0, 1.0, 1.0, alpha * unsung_opacity)
 
             cr.set_source(text_group)
             cr.mask(grad)
