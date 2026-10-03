@@ -85,22 +85,34 @@
 
 ```bash
 # Запустить остров (работает тихо в фоне):
+island &
+
+# То же самое из папки проекта:
 ./dynamic-island &
+```
+
+Короткое имя `island` — симлинк на лаунчер:
+
+```bash
+ln -sfn "$PWD/dynamic_island.py" ~/.local/bin/island
 ```
 
 ### Запуск конкретных экранов для тестов:
 ```bash
 # Раскрытый плеер
-./dynamic-island --view MediaBig
+island --view MediaBig
 
 # Меню настроек
-./dynamic-island --view Settings
+island --view Settings
 
 # Настройка таймера
-./dynamic-island --view TimerSet
+island --view TimerSet
 
 # Сразу запустить таймер на 90 секунд
-./dynamic-island --timer 90
+island --timer 90
+
+# Показать диагностику в терминале
+island --verbose
 ```
 
 ### Запустить проверку всех Roc-модулей:
@@ -116,7 +128,7 @@
 
 В `~/.config/hypr/hyprland.conf`:
 ```ini
-exec-once = $HOME/DynamicIsland-roc/dynamic-island &
+exec-once = island &
 ```
 
 Либо скопируй готовый `.desktop`:
