@@ -19,7 +19,8 @@ from typing import Callable, Optional
 
 logger = logging.getLogger(__name__)
 
-AUTOSTART_DIR = Path.home() / ".config" / "autostart"
+_xdg_config = os.environ.get("XDG_CONFIG_HOME")
+AUTOSTART_DIR = (Path(_xdg_config) if _xdg_config else (Path.home() / ".config")) / "autostart"
 AUTOSTART_FILE = AUTOSTART_DIR / "dynamic-island.desktop"
 
 _EVIOCGKEY_64 = (2 << 30) | (ord("E") << 8) | 0x18 | (64 << 16)
@@ -333,12 +334,15 @@ class Autostart:
 
             if not exec_cmd:
                 script_dir = Path(__file__).resolve().parent
+                island_py = script_dir / "dynamic_island.py"
                 main_py = script_dir / "main.py"
                 python_bin = sys.executable
-                if main_py.is_file():
+                if island_py.is_file():
+                    exec_cmd = f"{python_bin} {island_py}"
+                elif main_py.is_file():
                     exec_cmd = f"{python_bin} {main_py}"
                 else:
-                    exec_cmd = f"{python_bin} {script_dir / 'main.py'}"
+                    exec_cmd = "dynamic-island"
 
             AUTOSTART_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -383,7 +387,9 @@ if __name__ == "__main__":
     print(f"Autostart Desktop Path: {Autostart.DESKTOP_PATH}")
 
     print("\nTesting Autostart helper (enable -> check -> disable):")
-    Autostart.set(True, exec_cmd="python3 /tmp/test-island.py")
+    import tempfile
+    test_island_cmd = f"python3 {Path(tempfile.gettempdir()) / 'test-island.py'}"
+    Autostart.set(True, exec_cmd=test_island_cmd)
     print(f"  After enable : Autostart.is_enabled() = {Autostart.is_enabled()}")
     if Autostart.DESKTOP_PATH.is_file():
         print("  File contents preview:")

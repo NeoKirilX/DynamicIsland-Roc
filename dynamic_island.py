@@ -16,6 +16,23 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 WAYLAND_DIR = SCRIPT_DIR
 FONTS_DIR = SCRIPT_DIR / "fonts"
 
+def find_roc_binary() -> Path | None:
+    which_roc = shutil.which("roc")
+    if which_roc:
+        p = Path(which_roc)
+        if p.is_file() and os.access(p, os.X_OK):
+            return p
+
+    home = Path.home()
+    candidates = [
+        home / ".local" / "bin" / "roc",
+        home / "roc" / "roc",
+    ]
+    for cand in candidates:
+        if cand.is_file() and os.access(cand, os.X_OK):
+            return cand
+    return None
+
 def ensure_environment_silent() -> None:
     FONTS_DIR.mkdir(parents=True, exist_ok=True)
     required_fonts = [
@@ -24,28 +41,44 @@ def ensure_environment_silent() -> None:
         "SF-Pro-Text-Medium.otf",
         "SF-Pro-Text-Semibold.otf",
     ]
-    source_fonts = Path("/home/neokirilx/DynamicIsland/Fonts")
+    xdg_data = os.environ.get("XDG_DATA_HOME")
+    data_home = Path(xdg_data) if xdg_data else (Path.home() / ".local" / "share")
+    font_sources = [
+        Path.home() / "DynamicIsland" / "Fonts",
+        data_home / "fonts",
+        Path.home() / ".fonts",
+    ]
     for f in required_fonts:
         target = FONTS_DIR / f
         if not target.is_file():
-            source = source_fonts / f
-            if source.is_file():
-                try:
-                    shutil.copy2(source, target)
-                except Exception:
-                    pass
+            for s_dir in font_sources:
+                source = s_dir / f
+                if source.is_file():
+                    try:
+                        shutil.copy2(source, target)
+                        break
+                    except Exception:
+                        pass
 
-    roc_bin = shutil.which("roc") or (Path.home() / ".local" / "bin" / "roc")
-    if not (roc_bin and Path(str(roc_bin)).is_file()):
-        prebuilt = Path("/home/neokirilx/roc/roc")
-        if prebuilt.is_file():
-            try:
-                symlink = Path.home() / ".local" / "bin" / "roc"
-                symlink.parent.mkdir(parents=True, exist_ok=True)
-                if not symlink.exists():
-                    symlink.symlink_to(prebuilt)
-            except Exception:
-                pass
+    roc_bin = find_roc_binary()
+    home = Path.home()
+    prebuilt = home / "roc" / "roc"
+    local_roc = home / ".local" / "bin" / "roc"
+    if (not roc_bin or not local_roc.exists()) and prebuilt.is_file():
+        try:
+            local_roc.parent.mkdir(parents=True, exist_ok=True)
+            if not local_roc.exists():
+                local_roc.symlink_to(prebuilt)
+        except Exception:
+            pass
+
+    island_symlink = home / ".local" / "bin" / "dynamic-island"
+    if not island_symlink.exists():
+        try:
+            island_symlink.parent.mkdir(parents=True, exist_ok=True)
+            island_symlink.symlink_to(SCRIPT_DIR / "dynamic_island.py")
+        except Exception:
+            pass
 
 def silence_output_unless_verbose(verbose: bool) -> None:
     if verbose:
@@ -138,7 +171,7 @@ def main() -> int:
     signal.signal(signal.SIGINT, signal.SIG_DFL)
 
     app = Gtk.Application(
-        application_id="com.github.neokirilx.dynamic_island_roc",
+        application_id="io.github.dynamic_island",
         flags=Gio.ApplicationFlags.NON_UNIQUE,
     )
 

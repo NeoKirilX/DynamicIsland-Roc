@@ -7,8 +7,10 @@ import colorsys
 import hashlib
 import json
 import logging
+import os
 import shutil
 import subprocess
+import tempfile
 import threading
 import time
 import urllib.parse
@@ -22,7 +24,7 @@ from gi.repository import Gio, GLib
 
 logger = logging.getLogger(__name__)
 
-COVER_CACHE_DIR = Path("/tmp/dynamic_island_covers")
+COVER_CACHE_DIR = Path(tempfile.gettempdir()) / "dynamic_island_covers"
 
 TURN_DEGREES: float = 28.0
 
@@ -148,11 +150,13 @@ def resolve_desktop_friendly_name(desktop_entry: str, identity: str = "", bus_na
     entry_clean = desktop_entry.strip()
     if entry_clean:
         candidates = [f"{entry_clean}.desktop", entry_clean]
+        xdg_data = os.environ.get("XDG_DATA_HOME")
+        local_data = Path(xdg_data) if xdg_data else (Path.home() / ".local/share")
         search_dirs = [
-            Path.home() / ".local/share/applications",
+            local_data / "applications",
             Path("/usr/local/share/applications"),
             Path("/usr/share/applications"),
-            Path.home() / ".local/share/flatpak/exports/share/applications",
+            local_data / "flatpak/exports/share/applications",
             Path("/var/lib/flatpak/exports/share/applications"),
         ]
         for sdir in search_dirs:
@@ -1204,7 +1208,7 @@ if __name__ == "__main__":
     print(f"  t=1.2s: {p1:.2f}s (delta = {p1 - p0:.2f}s, is_playing={service.is_playing})")
 
     print("\nTesting cover art cache & dominant palette extraction:")
-    test_img_path = Path("/tmp/dynamic_island_covers/test_cover.png")
+    test_img_path = COVER_CACHE_DIR / "test_cover.png"
     test_img = Image.new("RGB", (64, 64), (18, 22, 36))
     for x in range(15, 35):
         for y in range(15, 35):

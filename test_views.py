@@ -23,7 +23,7 @@ def test_views():
     print("Testing DynamicIsland MainWindow and 14 Island Views...")
     print("=" * 60)
 
-    app = Gtk.Application(application_id="com.github.neokirilx.test_views")
+    app = Gtk.Application(application_id="io.github.dynamic_island.test_views")
 
     views_to_test = [
         "Idle",

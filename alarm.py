@@ -8,6 +8,7 @@ import os
 import shutil
 import struct
 import subprocess
+import tempfile
 import threading
 import time
 import wave
@@ -26,7 +27,7 @@ SOUND_CANDIDATES = (
     "/usr/share/sounds/freedesktop/stereo/complete.oga",
     "/usr/share/sounds/freedesktop/stereo/message.oga",
 )
-FALLBACK_WAV_PATH = "/tmp/dynamic_island_alarm_fallback.wav"
+FALLBACK_WAV_PATH = os.path.join(tempfile.gettempdir(), "dynamic_island_alarm_fallback.wav")
 
 def _generate_fallback_wav(path: str = FALLBACK_WAV_PATH) -> str:
     try:

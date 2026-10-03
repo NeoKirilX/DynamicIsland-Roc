@@ -85,7 +85,7 @@
 
 ```bash
 # Запустить остров (работает тихо в фоне):
-/home/neokirilx/DynamicIsland-roc/dynamic-island &
+./dynamic-island &
 ```
 
 ### Запуск конкретных экранов для тестов:
@@ -105,7 +105,7 @@
 
 ### Запустить проверку всех Roc-модулей:
 ```bash
-/home/neokirilx/DynamicIsland-roc/test_all.sh
+./test_all.sh
 ```
 
 ---
@@ -116,13 +116,13 @@
 
 В `~/.config/hypr/hyprland.conf`:
 ```ini
-exec-once = /home/neokirilx/DynamicIsland-roc/dynamic-island &
+exec-once = $HOME/DynamicIsland-roc/dynamic-island &
 ```
 
 Либо скопируй готовый `.desktop`:
 ```bash
 mkdir -p ~/.config/autostart
-cp /home/neokirilx/DynamicIsland-roc/dynamic-island.desktop ~/.config/autostart/
+cp dynamic-island.desktop ~/.config/autostart/
 ```
 
 ---

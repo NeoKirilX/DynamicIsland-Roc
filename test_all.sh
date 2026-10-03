@@ -3,10 +3,14 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-if [ -x "/home/neokirilx/roc/roc" ]; then
-    ROC_BIN="/home/neokirilx/roc/roc"
+if [ -n "${ROC_BIN:-}" ] && [ -x "$ROC_BIN" ]; then
+    :
 elif command -v roc >/dev/null 2>&1; then
     ROC_BIN="$(command -v roc)"
+elif [ -x "$HOME/.local/bin/roc" ]; then
+    ROC_BIN="$HOME/.local/bin/roc"
+elif [ -x "$HOME/roc/roc" ]; then
+    ROC_BIN="$HOME/roc/roc"
 else
     echo "Error: Roc compiler not found!" >&2
     exit 1

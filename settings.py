@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from pathlib import Path
 from typing import Any, Callable, Optional, Tuple
 
@@ -14,8 +15,12 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
-CONFIG_DIR = Path.home() / ".config" / "dynamic-island"
+xdg_config = os.environ.get("XDG_CONFIG_HOME")
+CONFIG_DIR = (Path(xdg_config) if xdg_config else (Path.home() / ".config")) / "dynamic-island"
 CONFIG_FILE = CONFIG_DIR / "settings.json"
+
+xdg_cache = os.environ.get("XDG_CACHE_HOME")
+CACHE_DIR = (Path(xdg_cache) if xdg_cache else (Path.home() / ".cache")) / "dynamic-island"
 
 MIN_SCALE = 85
 MAX_SCALE = 130

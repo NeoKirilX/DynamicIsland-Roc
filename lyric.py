@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
+import tempfile
 from typing import Any
 
 import cairo
@@ -431,7 +432,7 @@ if __name__ == "__main__":
         is_active=True,
     )
 
-    out_png = "/tmp/opencode/test_lyric_render.png"
+    out_png = str(Path(tempfile.gettempdir()) / "test_lyric_render.png")
     surf.write_to_png(out_png)
     print(f"Exported karaoke test rendering to {out_png}")
     print("LyricLine tests completed successfully!")
