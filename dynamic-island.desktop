@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=Dynamic Island (Roc)
+GenericName=Dynamic Island Status Bar
+Comment=Apple-style fluid Dynamic Island for Arch Linux Wayland powered by Roc architecture
+Exec=python3 /home/neokirilx/DynamicIsland-roc/dynamic_island.py
+Icon=preferences-desktop-display
+Terminal=false
+Categories=Utility;DesktopUtility;System;
+StartupNotify=false
+X-GNOME-Autostart-enabled=true
+Keywords=dynamic;island;status;wayland;statusbar;apple;roc;
