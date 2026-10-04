@@ -287,7 +287,7 @@ def draw_text(
     cr.new_path()
     return ext.width
 
-_IMAGE_SURFACE_CACHE: dict[str, cairo.ImageSurface] = {}
+_IMAGE_SURFACE_CACHE: dict[str, tuple[cairo.ImageSurface, bytearray]] = {}
 _MEASURE_SURFACE = cairo.ImageSurface(cairo.FORMAT_ARGB32, 1, 1)
 _MEASURE_CR = cairo.Context(_MEASURE_SURFACE)
 
@@ -295,19 +295,19 @@ def load_cairo_image(path: Optional[str]) -> Optional[cairo.ImageSurface]:
     if not path or not os.path.isfile(path) or Image is None:
         return None
     if path in _IMAGE_SURFACE_CACHE:
-        return _IMAGE_SURFACE_CACHE[path]
+        return _IMAGE_SURFACE_CACHE[path][0]
     try:
         pil_img = Image.open(path).convert("RGBA")
         raw = bytearray(pil_img.tobytes("raw", "BGRA"))
         stride = cairo.ImageSurface.format_stride_for_width(cairo.FORMAT_ARGB32, pil_img.width)
         surf = cairo.ImageSurface.create_for_data(raw, cairo.FORMAT_ARGB32, pil_img.width, pil_img.height, stride)
-        surf._keep_alive = raw
-        _IMAGE_SURFACE_CACHE[path] = surf
+        _IMAGE_SURFACE_CACHE[path] = (surf, raw)
         if len(_IMAGE_SURFACE_CACHE) > 30:
             old_k = next(iter(_IMAGE_SURFACE_CACHE))
             del _IMAGE_SURFACE_CACHE[old_k]
         return surf
-    except Exception:
+    except Exception as exc:
+        logger.debug("Failed loading cairo image from %s: %s", path, exc)
         return None
 
 class MainWindow(Gtk.Window):
@@ -323,8 +323,8 @@ class MainWindow(Gtk.Window):
         self.set_decorated(False)
         self.set_resizable(False)
 
-        self.win_width = 1100
-        self.win_height = 750
+        self.win_width = 1920
+        self.win_height = 1080
         self.set_default_size(self.win_width, self.win_height)
 
         self.is_layer_shell = Gtk4LayerShell.is_supported()
@@ -332,10 +332,10 @@ class MainWindow(Gtk.Window):
             Gtk4LayerShell.init_for_window(self)
             Gtk4LayerShell.set_layer(self, Gtk4LayerShell.Layer.TOP)
             Gtk4LayerShell.set_anchor(self, Gtk4LayerShell.Edge.TOP, True)
-            Gtk4LayerShell.set_anchor(self, Gtk4LayerShell.Edge.LEFT, False)
-            Gtk4LayerShell.set_anchor(self, Gtk4LayerShell.Edge.RIGHT, False)
-            Gtk4LayerShell.set_anchor(self, Gtk4LayerShell.Edge.BOTTOM, False)
-            Gtk4LayerShell.set_margin(self, Gtk4LayerShell.Edge.TOP, 0)
+            Gtk4LayerShell.set_anchor(self, Gtk4LayerShell.Edge.BOTTOM, True)
+            Gtk4LayerShell.set_anchor(self, Gtk4LayerShell.Edge.LEFT, True)
+            Gtk4LayerShell.set_anchor(self, Gtk4LayerShell.Edge.RIGHT, True)
+            Gtk4LayerShell.set_exclusive_zone(self, 0)
             Gtk4LayerShell.set_keyboard_mode(self, Gtk4LayerShell.KeyboardMode.NONE)
 
         css_provider = Gtk.CssProvider()
@@ -2478,6 +2478,12 @@ class MainWindow(Gtk.Window):
         cr.paint()
         cr.restore()
         cr.set_operator(cairo.OPERATOR_OVER)
+
+        if width > 50 and height > 50:
+            if self.win_width != width or self.win_height != height:
+                self.win_width = width
+                self.win_height = height
+                self.update_input_region()
 
         dt = min(time.monotonic() - self._last_tick_time, 0.05)
         size = max(0.01, self._size.value)

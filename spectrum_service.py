@@ -7,7 +7,10 @@ import subprocess
 import threading
 import time
 
-import numpy as np
+try:
+    import numpy as np
+except ImportError:
+    np = None
 
 BANDS: int = 5
 BAND_NAMES: tuple[str, ...] = ("sub_bass", "bass", "mid", "high_mid", "treble")
@@ -27,9 +30,15 @@ class SpectrumAnalyzer:
         while self.size < rate * 0.04:
             self.size <<= 1
 
+        if np is None:
+            self.window = None
+            self.weights = None
+            self.norm = 0.0
+            return
+
         idx = np.arange(self.size, dtype=np.float32)
-        self.window: np.ndarray = 0.5 - 0.5 * np.cos(2.0 * np.pi * idx / (self.size - 1))
-        self.norm: float = 16.0 / (float(self.size) * float(self.size))
+        self.window = 0.5 - 0.5 * np.cos(2.0 * np.pi * idx / (self.size - 1))
+        self.norm = 16.0 / (float(self.size) * float(self.size))
 
         top = min(self.MAX_HZ, rate * 0.45)
         fine_bands = 40
@@ -43,7 +52,7 @@ class SpectrumAnalyzer:
         tilt = 10.0 ** (self.TILT_DB * np.log2(center_hz / 1000.0) / 10.0)
 
         num_bins = self.size // 2 + 1
-        self.weights: np.ndarray = np.zeros((BANDS, num_bins), dtype=np.float32)
+        self.weights = np.zeros((BANDS, num_bins), dtype=np.float32)
         group_size = fine_bands // BANDS
 
         for b in range(fine_bands):
@@ -55,7 +64,9 @@ class SpectrumAnalyzer:
                 overlap = max(0.0, min(hi, k + 0.5) - max(lo, k - 0.5))
                 self.weights[b5, k] += (overlap * tilt[b]) / float(group_size)
 
-    def analyze(self, samples: np.ndarray) -> np.ndarray:
+    def analyze(self, samples: Any) -> Any:
+        if np is None or self.weights is None:
+            return [0.0] * BANDS
         if len(samples) < self.size:
             padded = np.zeros(self.size, dtype=np.float32)
             padded[-len(samples):] = samples
@@ -95,7 +106,7 @@ class SpectrumService:
         self._peak: float = 0.0
         self._device_check_time: float = 0.0
 
-        self._ring: np.ndarray = np.zeros(self._analyzer.size, dtype=np.float32)
+        self._ring: Optional[np.ndarray] = np.zeros(self._analyzer.size, dtype=np.float32) if np is not None else None
         self._ring_head: int = 0
 
         self._bands: list[float] = [0.0] * BANDS
@@ -225,7 +236,9 @@ class SpectrumService:
             for i in range(BANDS):
                 self._bands[i] = 0.0
 
-    def _push_samples(self, samples: np.ndarray) -> None:
+    def _push_samples(self, samples: Any) -> None:
+        if np is None or self._ring is None:
+            return
         n = len(samples)
         size = self._analyzer.size
         if n >= size:
@@ -242,12 +255,19 @@ class SpectrumService:
         else:
             self._ring_head = (self._ring_head + part1) % size
 
-    def _get_ordered_window(self) -> np.ndarray:
+    def _get_ordered_window(self) -> Any:
+        if np is None or self._ring is None:
+            return None
         if self._ring_head == 0:
             return self._ring.copy()
         return np.concatenate((self._ring[self._ring_head :], self._ring[: self._ring_head]))
 
     def _run(self) -> None:
+        if np is None:
+            while not self._stop_event.is_set():
+                self._stop_event.wait(0.5)
+            return
+
         last_active = time.monotonic()
         bytes_to_read = self.CHUNK_SAMPLES * 2
 
