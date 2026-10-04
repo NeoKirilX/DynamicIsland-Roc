@@ -198,12 +198,29 @@ class _SettingsMeta(type):
     @property
     def gap(cls) -> int:
         val = cls._get_int("gap", 8)
-        return max(0, min(MAX_GAP, val))
+        return max(0, val)
 
     @gap.setter
     def gap(cls, value: int) -> None:
-        clamped = max(0, min(MAX_GAP, int(value)))
-        cls._set("gap", clamped)
+        cls._set("gap", max(0, int(value)))
+
+    @property
+    def pos_x(cls) -> int:
+        return cls._get_int("pos_x", 0)
+
+    @pos_x.setter
+    def pos_x(cls, value: int) -> None:
+        cls._set("pos_x", int(value))
+
+    @property
+    def pos_y(cls) -> int:
+        return cls._get_int("pos_y", cls.gap)
+
+    @pos_y.setter
+    def pos_y(cls, value: int) -> None:
+        val = int(value)
+        cls._set("pos_y", val)
+        cls._set("gap", max(0, val))
 
     @property
     def Gap(cls) -> int:

@@ -906,9 +906,43 @@ class MediaService:
         session.duration = max(0.0, float(length_us) / 1_000_000.0) if length_us else 0.0
 
         new_art_url = str(meta.get("mpris:artUrl", "") or "")
-        if new_art_url or session.title != self._title:
-            session.art_url = new_art_url
-            session.art_path = self._process_art_url(new_art_url)
+        if not new_art_url:
+            new_art_url = str(meta.get("artUrl", "") or meta.get("xesam:artUrl", "") or "")
+
+        if not new_art_url and shutil.which("playerctl"):
+            try:
+                pname = session.bus_name.replace("org.mpris.MediaPlayer2.", "")
+                res = subprocess.run(
+                    ["playerctl", "-p", pname, "metadata", "mpris:artUrl"],
+                    capture_output=True,
+                    text=True,
+                    timeout=0.5,
+                    check=False,
+                )
+                if res.returncode == 0 and res.stdout.strip():
+                    new_art_url = res.stdout.strip()
+            except Exception:
+                pass
+
+        if not new_art_url:
+            raw_url = str(meta.get("xesam:url", "") or "")
+            if raw_url.startswith("file://"):
+                local_music = Path(urllib.parse.unquote(urllib.parse.urlsplit(raw_url).path))
+            elif raw_url.startswith("/"):
+                local_music = Path(raw_url)
+            else:
+                local_music = None
+
+            if local_music and local_music.is_file():
+                music_dir = local_music.parent
+                for cand in ("cover.jpg", "cover.png", "folder.jpg", "folder.png", "album.jpg", "album.png", "front.jpg"):
+                    cand_path = music_dir / cand
+                    if cand_path.is_file():
+                        new_art_url = cand_path.as_uri()
+                        break
+
+        session.art_url = new_art_url
+        session.art_path = self._process_art_url(new_art_url)
 
     def _process_art_url(self, art_url: str) -> Optional[str]:
         if not art_url:
@@ -976,7 +1010,10 @@ class MediaService:
                 f.write(data)
 
             with self._lock:
-                if self._art_url == url:
+                for s in self._players.values():
+                    if s.art_url == url:
+                        s.art_path = str(target_path)
+                if self._art_url == url or not self._art_path:
                     self._art_path = str(target_path)
                     self._palette, self._accent = extract_dominant_palette(target_path)
                     self._notify_changed()
@@ -1068,6 +1105,14 @@ class MediaService:
         else:
             self._position = session.position
             self._position_at = session.position_at
+
+        if session.art_url and not session.art_path:
+            url_hash = hashlib.sha256(session.art_url.encode("utf-8")).hexdigest()[:16]
+            for ext in (".jpg", ".jpeg", ".png", ".webp"):
+                cand = COVER_CACHE_DIR / f"{url_hash}{ext}"
+                if cand.is_file() and cand.stat().st_size > 0:
+                    session.art_path = str(cand)
+                    break
 
         if session.art_path and session.art_path != self._art_path:
             self._art_url = session.art_url

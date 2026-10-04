@@ -54,8 +54,13 @@ def _query_hyprland_fullscreen(exclude_pid: Optional[int] = None) -> Optional[bo
 
                 fs = data.get("fullscreen")
                 fs_client = data.get("fullscreenClient")
-                if fs in (True, 1, 2) or fs_client in (1, 2):
+                # In Hyprland:
+                # 0 = not fullscreen, 1 = maximized (super+F), 2 = true fullscreen.
+                # Maximized keeps top bars/island visible; only true fullscreen (2) hides the island.
+                if fs == 2 or fs_client == 2 or (fs is True and fs != 1):
                     return True
+                if fs == 1 or fs_client == 1:
+                    return False
 
         res_ws = subprocess.run(
             ["hyprctl", "activeworkspace", "-j"],
@@ -67,6 +72,9 @@ def _query_hyprland_fullscreen(exclude_pid: Optional[int] = None) -> Optional[bo
         if res_ws.returncode == 0 and res_ws.stdout.strip():
             ws_data = json.loads(res_ws.stdout)
             if isinstance(ws_data, dict) and ws_data.get("hasfullscreen") is True:
+                # If active window is maximized (mode 1), do not consider it fullscreen
+                if fs == 1 or fs_client == 1:
+                    return False
                 last_title = str(ws_data.get("lastwindowtitle", "")).lower()
                 if not any(k in last_title for k in ("dynamic-island", "dynamicisland")):
                     return True

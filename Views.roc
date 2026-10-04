@@ -133,7 +133,7 @@ dimsForView = |view, hasLyrics|
         TimerSet -> { w: 300.0, h: 190.0, r: 38.0 }
         Menu -> { w: 300.0, h: 208.0, r: 34.0 }
         Settings -> { w: 320.0, h: 414.0, r: 34.0 }
-        Look -> { w: 320.0, h: 208.0, r: 34.0 }
+        Look -> { w: 320.0, h: 460.0, r: 34.0 }
         Shelf -> { w: 380.0, h: 136.0, r: 34.0 }
 
 resolveView : {
@@ -240,7 +240,7 @@ expect
     and Num.is_approx_eq dSettings.h 414.0 {}
     and Num.is_approx_eq dSettings.r 34.0 {}
     and Num.is_approx_eq dLook.w 320.0 {}
-    and Num.is_approx_eq dLook.h 208.0 {}
+    and Num.is_approx_eq dLook.h 460.0 {}
     and Num.is_approx_eq dLook.r 34.0 {}
 
 expect

@@ -104,7 +104,7 @@ class Dims:
         return Dims(self.w, h, self.r)
 
 LOOK_WIDTH = 320.0
-LOOK_HEIGHT = 420.0
+LOOK_HEIGHT = 460.0
 COLOR_INDIGO: Tuple[float, float, float] = (0.49, 0.478, 1.0)
 CARRY_TIMER: float = 78.0
 CARRY_SHELF: float = 54.0
@@ -323,8 +323,8 @@ class MainWindow(Gtk.Window):
         self.set_decorated(False)
         self.set_resizable(False)
 
-        self.win_width = 700
-        self.win_height = 460
+        self.win_width = 1100
+        self.win_height = 750
         self.set_default_size(self.win_width, self.win_height)
 
         self.is_layer_shell = Gtk4LayerShell.is_supported()
@@ -409,7 +409,8 @@ class MainWindow(Gtk.Window):
         self._bubble_scale = Spring(1.0)
         self._push = Spring(0.0)
         self._size = Spring(Settings.scale / 100.0)
-        self._gap = Spring(float(Settings.gap))
+        self._gap = Spring(float(Settings.pos_y))
+        self._pos_x = Spring(float(Settings.pos_x))
 
         self._scale.tune(320, 20)
         self._offset.tune(260, 26)
@@ -421,6 +422,13 @@ class MainWindow(Gtk.Window):
         self._push.tune(420, 18)
         self._size.tune(240, 26)
         self._gap.tune(240, 26)
+        self._pos_x.tune(240, 26)
+
+        self._dragging_look: bool = False
+        self._drag_start_x: float = 0.0
+        self._drag_start_y: float = 0.0
+        self._drag_orig_pos_x: int = 0
+        self._drag_orig_pos_y: int = 0
 
         self._forced: Optional[View] = None
         if forced_view:
@@ -561,6 +569,9 @@ class MainWindow(Gtk.Window):
     def is_click_locked(self) -> bool:
         if not Settings.click_lock:
             return False
+        # Never lock clicks inside settings, appearance, menu, or shelf panels
+        if self._panel in (Panel.SETTINGS, Panel.LOOK, Panel.MENU, Panel.SHELF):
+            return False
         now = time.monotonic()
         if now < self._click_lock_until:
             return True
@@ -586,6 +597,10 @@ class MainWindow(Gtk.Window):
         scroll = Gtk.EventControllerScroll.new(Gtk.EventControllerScrollFlags.BOTH_AXES)
         scroll.connect("scroll", self.on_mouse_scroll)
         self.area.add_controller(scroll)
+
+        key_ctrl = Gtk.EventControllerKey.new()
+        key_ctrl.connect("key-pressed", self.on_key_pressed)
+        self.area.add_controller(key_ctrl)
 
         try:
             drag_source = Gtk.DragSource.new()
@@ -805,7 +820,7 @@ class MainWindow(Gtk.Window):
         h = max(24.0, self._h.value)
         r = min(w / 2.0, min(h / 2.0, max(0.0, self._r.value)))
 
-        cx = self.win_width / 2.0
+        cx = self.win_width / 2.0 + self._pos_x.value
         offset_y = self._offset.value + self._gap.value / size
         pill_top = offset_y * size
 
@@ -836,7 +851,7 @@ class MainWindow(Gtk.Window):
     def _screen_to_local(self, sx: float, sy: float) -> Tuple[float, float]:
         size = max(0.01, self._size.value)
         scale = max(0.01, self._scale.value)
-        cx = self.win_width / 2.0
+        cx = self.win_width / 2.0 + self._pos_x.value
         offset_y = self._offset.value + self._gap.value / size
         pill_top = offset_y * size
 
@@ -864,6 +879,17 @@ class MainWindow(Gtk.Window):
     def on_mouse_motion(self, controller: Gtk.EventControllerMotion, x: float, y: float) -> None:
         self._mouse_x = x
         self._mouse_y = y
+
+        if self._dragging_look and self._current_view == View.LOOK:
+            step = self.get_modifier_step(controller)
+            dx = x - self._drag_start_x
+            dy = y - self._drag_start_y
+            snapped_dx = round(dx / step) * step
+            snapped_dy = round(dy / step) * step
+            self.set_pos_x(self._drag_orig_pos_x + int(snapped_dx))
+            self.set_pos_y(max(0, self._drag_orig_pos_y + int(snapped_dy)))
+            return
+
         lx, ly = self._screen_to_local(x, y)
         px, py, pw, ph, pr, bubble = self._get_pill_and_bubble_rects()
 
@@ -915,7 +941,7 @@ class MainWindow(Gtk.Window):
             row_y_start = py + 44.0
             row_h = 40.0
             hovered = None
-            for idx in range(8):
+            for idx in range(9):
                 ry = row_y_start + idx * row_h
                 if px + 10 <= lx <= px + pw - 10 and ry <= ly < ry + row_h:
                     hovered = idx
@@ -990,6 +1016,11 @@ class MainWindow(Gtk.Window):
                 self._row_list_settings.set_pressed(True)
             elif self._current_view == View.LOOK:
                 self._row_list_look.set_pressed(True)
+                self._dragging_look = True
+                self._drag_start_x = x
+                self._drag_start_y = y
+                self._drag_orig_pos_x = Settings.pos_x
+                self._drag_orig_pos_y = Settings.pos_y
 
             self._pressed = True
             self.set_targets()
@@ -1155,7 +1186,7 @@ class MainWindow(Gtk.Window):
             for idx in range(9):
                 key = setting_keys[idx]
                 ry = row_y_start + idx * row_h
-                if px + 10 <= lx <= px + pw - 10 and ry <= ly < ry + row_h:
+                if px <= lx <= px + pw and ry <= ly < ry + row_h:
                     cur = getattr(Settings, key)
                     setattr(Settings, key, not cur)
                     self._toggles[key].set_state(not cur, animate=True)
@@ -1171,7 +1202,13 @@ class MainWindow(Gtk.Window):
                     return
 
         if self._current_view == View.LOOK:
-            if px + 10 <= lx <= px + 150 and py + 12 <= ly <= py + 40:
+            if self._dragging_look:
+                did_drag = abs(x - self._drag_start_x) >= 4 or abs(y - self._drag_start_y) >= 4
+                self._dragging_look = False
+                if did_drag:
+                    return
+
+            if px <= lx <= px + 150 and py + 12 <= ly <= py + 40:
                 self.open_panel(Panel.MENU)
                 self.update_view()
                 self.set_targets()
@@ -1179,8 +1216,9 @@ class MainWindow(Gtk.Window):
 
             row_y_start = py + 44.0
             row_h = 40.0
+            mod_step = self.get_modifier_step()
 
-            if px + 10 <= lx <= px + pw - 10:
+            if px <= lx <= px + pw:
                 if row_y_start <= ly < row_y_start + row_h:
                     idx = SCALES.index(Settings.scale) if Settings.scale in SCALES else 1
                     new_scale = SCALES[(idx + 1) % len(SCALES)]
@@ -1188,64 +1226,54 @@ class MainWindow(Gtk.Window):
                     return
 
                 if row_y_start + row_h <= ly < row_y_start + 2 * row_h:
-                    idx = GAPS.index(Settings.gap) if Settings.gap in GAPS else 2
-                    new_gap = GAPS[(idx + 1) % len(GAPS)]
-                    self.set_gap(new_gap)
+                    self.set_pos_y(Settings.pos_y + mod_step)
                     return
 
                 if row_y_start + 2 * row_h <= ly < row_y_start + 3 * row_h:
-                    idx = RADII.index(Settings.radius) if Settings.radius in RADII else -1
-                    if idx >= 0:
-                        new_radius = RADII[(idx + 1) % len(RADII)]
-                    else:
-                        new_radius = next((r for r in RADII if r > Settings.radius), RADII[0])
-                    self.set_radius(new_radius)
+                    self.set_pos_x(Settings.pos_x + mod_step)
                     return
 
                 if row_y_start + 3 * row_h <= ly < row_y_start + 4 * row_h:
-                    idx = HEIGHTS.index(Settings.height) if Settings.height in HEIGHTS else -1
-                    if idx >= 0:
-                        new_h = HEIGHTS[(idx + 1) % len(HEIGHTS)]
-                    else:
-                        new_h = next((h for h in HEIGHTS if h > Settings.height), HEIGHTS[0])
-                    self.set_height(new_h)
+                    idx = RADII.index(Settings.radius) if Settings.radius in RADII else -1
+                    new_radius = RADII[(idx + 1) % len(RADII)] if idx >= 0 else RADII[0]
+                    self.set_radius(new_radius)
                     return
 
                 if row_y_start + 4 * row_h <= ly < row_y_start + 5 * row_h:
-                    idx = TEXT_SCALES.index(Settings.text_scale) if Settings.text_scale in TEXT_SCALES else -1
-                    if idx >= 0:
-                        new_ts = TEXT_SCALES[(idx + 1) % len(TEXT_SCALES)]
-                    else:
-                        new_ts = next((ts for ts in TEXT_SCALES if ts > Settings.text_scale), TEXT_SCALES[0])
-                    self.set_text_scale(new_ts)
+                    idx = HEIGHTS.index(Settings.height) if Settings.height in HEIGHTS else -1
+                    new_h = HEIGHTS[(idx + 1) % len(HEIGHTS)] if idx >= 0 else HEIGHTS[0]
+                    self.set_height(new_h)
                     return
 
                 if row_y_start + 5 * row_h <= ly < row_y_start + 6 * row_h:
+                    idx = TEXT_SCALES.index(Settings.text_scale) if Settings.text_scale in TEXT_SCALES else -1
+                    new_ts = TEXT_SCALES[(idx + 1) % len(TEXT_SCALES)] if idx >= 0 else TEXT_SCALES[0]
+                    self.set_text_scale(new_ts)
+                    return
+
+                if row_y_start + 6 * row_h <= ly < row_y_start + 7 * row_h:
                     modes = [MATERIAL_LIQUID, MATERIAL_MATTE, MATERIAL_NONE]
                     cur_idx = modes.index(Settings.material) if Settings.material in modes else 0
                     new_mat = modes[(cur_idx + 1) % len(modes)]
                     self.set_material(new_mat)
                     return
 
-                if row_y_start + 6 * row_h <= ly < row_y_start + 7 * row_h:
+                if row_y_start + 7 * row_h <= ly < row_y_start + 8 * row_h:
                     idx = GLASS_LEVELS.index(Settings.glass) if Settings.glass in GLASS_LEVELS else -1
-                    if idx >= 0:
-                        new_glass = GLASS_LEVELS[(idx + 1) % len(GLASS_LEVELS)]
-                    else:
-                        new_glass = next((g for g in GLASS_LEVELS if g > Settings.glass), GLASS_LEVELS[0])
+                    new_glass = GLASS_LEVELS[(idx + 1) % len(GLASS_LEVELS)] if idx >= 0 else GLASS_LEVELS[0]
                     self.set_glass(new_glass)
                     return
 
-                if row_y_start + 7 * row_h <= ly < row_y_start + 8 * row_h:
+                if row_y_start + 8 * row_h <= ly < row_y_start + 9 * row_h:
                     colors = [c[0] for c in LOOK_COLORS]
                     cur_idx = colors.index(Settings.accent) if Settings.accent in colors else 0
                     new_accent = colors[(cur_idx + 1) % len(colors)]
                     self.set_accent(new_accent)
                     return
 
-            swatch_y = row_y_start + 8 * row_h + 18.0
+            swatch_y = row_y_start + 9 * row_h + 18.0
             step_x = (pw - 20.0) / len(LOOK_COLORS)
-            if swatch_y - 15.0 <= ly <= swatch_y + 15.0 and px + 10.0 <= lx <= px + pw - 10.0:
+            if swatch_y - 15.0 <= ly <= swatch_y + 15.0 and px <= lx <= px + pw:
                 idx = int((lx - (px + 10.0)) / step_x)
                 if 0 <= idx < len(LOOK_COLORS):
                     self.set_accent(LOOK_COLORS[idx][0])
@@ -1331,52 +1359,58 @@ class MainWindow(Gtk.Window):
         px, py, pw, ph, _, _ = self._get_pill_and_bubble_rects()
 
         if self._current_view == View.LOOK:
+            nudge = 1 if up else -1
+            mod_step = self.get_modifier_step(controller)
             row_y_start = py + 44.0
             row_h = 40.0
 
             if row_y_start <= ly < row_y_start + row_h:
                 idx = SCALES.index(Settings.scale) if Settings.scale in SCALES else 1
-                new_idx = max(0, min(len(SCALES) - 1, idx + step))
+                new_idx = max(0, min(len(SCALES) - 1, idx + nudge))
                 self.set_scale(SCALES[new_idx])
                 return True
 
             if row_y_start + row_h <= ly < row_y_start + 2 * row_h:
-                idx = GAPS.index(Settings.gap) if Settings.gap in GAPS else 2
-                new_idx = max(0, min(len(GAPS) - 1, idx + step))
-                self.set_gap(GAPS[new_idx])
+                new_y = Settings.pos_y - nudge * mod_step
+                self.set_pos_y(new_y)
                 return True
 
             if row_y_start + 2 * row_h <= ly < row_y_start + 3 * row_h:
-                new_radius = max(0, min(100, Settings.radius + step * 5))
-                self.set_radius(new_radius)
+                new_x = Settings.pos_x + nudge * mod_step
+                self.set_pos_x(new_x)
                 return True
 
             if row_y_start + 3 * row_h <= ly < row_y_start + 4 * row_h:
-                new_h = max(0, min(16, Settings.height + step))
-                self.set_height(new_h)
+                new_radius = max(0, min(100, Settings.radius + nudge * 5))
+                self.set_radius(new_radius)
                 return True
 
             if row_y_start + 4 * row_h <= ly < row_y_start + 5 * row_h:
-                new_ts = max(80, min(130, Settings.text_scale + step * 5))
-                self.set_text_scale(new_ts)
+                new_h = max(0, min(16, Settings.height + nudge))
+                self.set_height(new_h)
                 return True
 
             if row_y_start + 5 * row_h <= ly < row_y_start + 6 * row_h:
-                modes = [MATERIAL_LIQUID, MATERIAL_MATTE, MATERIAL_NONE]
-                cur_idx = modes.index(Settings.material) if Settings.material in modes else 0
-                new_idx = max(0, min(len(modes) - 1, cur_idx - step))
-                self.set_material(modes[new_idx])
+                new_ts = max(80, min(130, Settings.text_scale + nudge * 5))
+                self.set_text_scale(new_ts)
                 return True
 
             if row_y_start + 6 * row_h <= ly < row_y_start + 7 * row_h:
-                new_glass = max(20, min(100, Settings.glass + step * 5))
+                modes = [MATERIAL_LIQUID, MATERIAL_MATTE, MATERIAL_NONE]
+                cur_idx = modes.index(Settings.material) if Settings.material in modes else 0
+                new_idx = max(0, min(len(modes) - 1, cur_idx - nudge))
+                self.set_material(modes[new_idx])
+                return True
+
+            if row_y_start + 7 * row_h <= ly < row_y_start + 8 * row_h:
+                new_glass = max(20, min(100, Settings.glass + nudge * 5))
                 self.set_glass(new_glass)
                 return True
 
-            if row_y_start + 7 * row_h <= ly:
+            if row_y_start + 8 * row_h <= ly:
                 colors = [c[0] for c in LOOK_COLORS]
                 cur_idx = colors.index(Settings.accent) if Settings.accent in colors else 0
-                new_idx = max(0, min(len(colors) - 1, cur_idx + step))
+                new_idx = max(0, min(len(colors) - 1, cur_idx + nudge))
                 self.set_accent(colors[new_idx])
                 return True
 
@@ -1507,6 +1541,7 @@ class MainWindow(Gtk.Window):
         self._bubble_scale.target = (
             0.93 if self._bubble_pressed else (1.07 if self._bubble_hover else 1.0)
         )
+        self.update_input_region()
         self.area.queue_draw()
 
     def open_panel(self, panel: Panel) -> None:
@@ -1585,6 +1620,7 @@ class MainWindow(Gtk.Window):
         moving |= self._offset.advance(dt)
         moving |= self._size.advance(dt)
         moving |= self._gap.advance(dt)
+        moving |= self._pos_x.advance(dt)
         moving |= self._split.advance(dt)
         moving |= self._bubble_scale.advance(dt)
         moving |= self._push.advance(dt)
@@ -1769,15 +1805,15 @@ class MainWindow(Gtk.Window):
         size = max(0.01, self._size.value)
         scale = max(0.01, self._scale.value)
         w = max(24.0, self._w.value)
-        h = max(24.0, self._h.value)
-        cx = self.win_width / 2.0
+        h = max(24.0, self._h.value + Settings.height)
+        cx = self.win_width / 2.0 + self._pos_x.value
         offset_y = self._offset.value + self._gap.value / size
         pill_top = offset_y * size
 
-        pill_left_win = cx - (w * scale * size) / 2.0
-        pill_top_win = pill_top
-        pill_w_win = w * scale * size
-        pill_h_win = h * scale * size
+        pill_left_win = cx - (w * scale * size) / 2.0 - 2.0
+        pill_top_win = max(0.0, pill_top - 2.0)
+        pill_w_win = w * scale * size + 4.0
+        pill_h_win = h * scale * size + 4.0
 
         reg = cairo.Region(
             cairo.RectangleInt(
@@ -1795,10 +1831,10 @@ class MainWindow(Gtk.Window):
             bw = BUBBLE_WIDTH * max(0.01, self._bubble_scale.value) / scale
             bh = BUBBLE_HEIGHT * max(0.01, self._bubble_scale.value) / scale
 
-            b_left_win = cx + bx * scale * size
-            b_top_win = pill_top
-            b_w_win = bw * scale * size
-            b_h_win = bh * scale * size
+            b_left_win = cx + bx * scale * size - 2.0
+            b_top_win = max(0.0, pill_top - 2.0)
+            b_w_win = bw * scale * size + 4.0
+            b_h_win = bh * scale * size + 4.0
             reg.union(
                 cairo.RectangleInt(
                     int(b_left_win),
@@ -2342,15 +2378,56 @@ class MainWindow(Gtk.Window):
         self._digits_setup.set_text(f"{self._minutes}:00")
         self.area.queue_draw()
 
+    def get_modifier_step(self, controller: Optional[Any] = None) -> int:
+        state = 0
+        if controller and hasattr(controller, "get_current_event_state"):
+            try:
+                state = int(controller.get_current_event_state())
+            except Exception:
+                state = 0
+        if state & Gdk.ModifierType.CONTROL_MASK:
+            return 50
+        if state & Gdk.ModifierType.SHIFT_MASK:
+            return 10
+        return 1
+
+    def on_key_pressed(
+        self, controller: Gtk.EventControllerKey, keyval: int, keycode: int, state: Gdk.ModifierType
+    ) -> bool:
+        if self._current_view != View.LOOK:
+            return False
+        step = 50 if (state & Gdk.ModifierType.CONTROL_MASK) else (10 if (state & Gdk.ModifierType.SHIFT_MASK) else 1)
+        if keyval in (Gdk.KEY_Left, 0xFF51):
+            self.set_pos_x(Settings.pos_x - step)
+            return True
+        elif keyval in (Gdk.KEY_Right, 0xFF53):
+            self.set_pos_x(Settings.pos_x + step)
+            return True
+        elif keyval in (Gdk.KEY_Up, 0xFF52):
+            self.set_pos_y(Settings.pos_y - step)
+            return True
+        elif keyval in (Gdk.KEY_Down, 0xFF54):
+            self.set_pos_y(Settings.pos_y + step)
+            return True
+        return False
+
+    def set_pos_x(self, px: int) -> None:
+        Settings.pos_x = px
+        self._pos_x.target = float(px)
+        self.set_targets()
+
+    def set_pos_y(self, py: int) -> None:
+        Settings.pos_y = py
+        self._gap.target = float(py)
+        self.set_targets()
+
     def set_scale(self, percent: int) -> None:
         Settings.scale = percent
         self._size.target = percent / 100.0
         self.set_targets()
 
     def set_gap(self, px: int) -> None:
-        Settings.gap = px
-        self._gap.target = float(px)
-        self.set_targets()
+        self.set_pos_y(px)
 
     def set_radius(self, percent: int) -> None:
         Settings.radius = percent
@@ -2409,7 +2486,7 @@ class MainWindow(Gtk.Window):
         h = max(24.0, self._h.value + Settings.height)
         r = min(w / 2.0, min(h / 2.0, max(0.0, self._r.value * Settings.radius / 100.0)))
 
-        cx = width / 2.0
+        cx = width / 2.0 + self._pos_x.value
         offset_y = self._offset.value + self._gap.value / size
         pill_top = offset_y * size
 
@@ -3484,9 +3561,11 @@ class MainWindow(Gtk.Window):
         else:
             material_label = "Отключено"
 
+        pos_x_str = f"+{Settings.pos_x} px" if Settings.pos_x > 0 else f"{Settings.pos_x} px"
         rows = [
             (Glyph.Size, "Размер", f"{Settings.scale}%"),
-            (Glyph.Gap, "Отступ от края", f"{Settings.gap} px"),
+            (Glyph.Gap, "Позиция Y (Отступ)", f"{Settings.pos_y} px"),
+            (Glyph.Size, "Позиция X (Смещение)", pos_x_str),
             (Glyph.Rim, "Радиус скругления", f"{Settings.radius}%"),
             (Glyph.Expand, "Высота острова", f"{Settings.height} px"),
             (Glyph.Lines, "Размер текста", f"{Settings.text_scale}%"),
