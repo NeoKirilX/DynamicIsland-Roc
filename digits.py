@@ -3,6 +3,11 @@ from __future__ import annotations
 
 import cairo
 
+try:
+    from settings import Settings
+except ImportError:
+    from .settings import Settings
+
 class _Cell:
 
     def __init__(self, char: str) -> None:
@@ -109,6 +114,7 @@ class Digits:
         align: str = "right",
         valign: str = "top",
     ) -> None:
+        font_size = font_size * Settings.text_factor()
         if not self._cells or font_size <= 0.0:
             return
 

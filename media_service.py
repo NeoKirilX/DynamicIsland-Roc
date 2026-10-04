@@ -270,6 +270,7 @@ class MediaService:
 
         self._context = GLib.MainContext()
         self._loop = GLib.MainLoop(self._context)
+        self._poll_source: Optional[GLib.Source] = None
         self._running: bool = True
         self._thread: Optional[threading.Thread] = None
 
@@ -320,8 +321,9 @@ class MediaService:
         with self._lock:
             pos = self._position
             if self._is_playing:
+                rate = self._rate if self._rate > 0.0 else 1.0
                 delta = time.monotonic() - self._position_at
-                pos += delta * self._rate
+                pos += delta * rate
             if pos < 0.0:
                 return 0.0
             if self._duration > 0.0 and pos > self._duration:
@@ -406,6 +408,64 @@ class MediaService:
     def around(color: tuple[float, float, float]) -> list[tuple[float, float, float]]:
         return [color, turn_hue(color, TURN_DEGREES), turn_hue(color, -TURN_DEGREES)]
 
+    def _query_player_position_sync(self, bus_name: str) -> Optional[float]:
+        try:
+            reply = self._bus.call_sync(
+                bus_name,
+                "/org/mpris/MediaPlayer2",
+                "org.freedesktop.DBus.Properties",
+                "Get",
+                GLib.Variant("(ss)", ("org.mpris.MediaPlayer2.Player", "Position")),
+                GLib.VariantType("(v)"),
+                Gio.DBusCallFlags.NONE,
+                250,
+                None,
+            )
+            pos_us = reply.unpack()[0]
+            return float(pos_us) / 1_000_000.0
+        except Exception:
+            return None
+
+    def _on_poll_timer(self) -> bool:
+        if not self._running:
+            return False
+        with self._lock:
+            player = self._current_player
+            if not player or player not in self._players:
+                return True
+            session = self._players[player]
+            is_playing = session.is_playing
+            old_pos = self._position
+            if is_playing:
+                rate = self._rate if self._rate > 0.0 else 1.0
+                old_pos += (time.monotonic() - self._position_at) * rate
+
+        real_pos = self._query_player_position_sync(player)
+        if real_pos is None:
+            return True
+
+        now = time.monotonic()
+        needs_notify = False
+        with self._lock:
+            if self._current_player != player:
+                return True
+            session = self._players.get(player)
+            if not session:
+                return True
+
+            drift = real_pos - old_pos
+            if abs(drift) >= 1.2:
+                self._position = real_pos
+                self._position_at = now
+                session.position = real_pos
+                session.position_at = now
+                needs_notify = True
+
+        if needs_notify:
+            self._notify_changed()
+
+        return True
+
     def _worker_loop(self) -> None:
         self._context.push_thread_default()
         try:
@@ -441,6 +501,10 @@ class MediaService:
                 self._on_seeked,
                 None,
             )
+
+            self._poll_source = GLib.timeout_source_new(500)
+            self._poll_source.set_callback(self._on_poll_timer)
+            self._poll_source.attach(self._context)
 
             self._loop.run()
         except Exception as e:
@@ -517,7 +581,11 @@ class MediaService:
                     was_playing = session.is_playing
                     session.playback_status = status
                     session.is_playing = (status.lower() == "playing")
-                    if was_playing and not session.is_playing:
+                    real_pos = self._query_player_position_sync(bus_name)
+                    if real_pos is not None:
+                        session.position = real_pos
+                        session.position_at = time.monotonic()
+                    elif was_playing and not session.is_playing:
                         session.position += (time.monotonic() - session.position_at) * session.rate
                         session.position_at = time.monotonic()
                     elif not was_playing and session.is_playing:
@@ -539,6 +607,10 @@ class MediaService:
 
                 if "Metadata" in changed_props:
                     self._parse_metadata(session, changed_props["Metadata"])
+                    real_pos = self._query_player_position_sync(bus_name)
+                    if real_pos is not None:
+                        session.position = real_pos
+                        session.position_at = time.monotonic()
                     needs_refresh = True
 
                 if "Position" in changed_props:
@@ -716,7 +788,7 @@ class MediaService:
                 self._parse_metadata(session, props["Metadata"])
 
             pos_us = int(props.get("Position", 0))
-            if pos_us > 0:
+            if pos_us >= 0:
                 session.position = pos_us / 1_000_000.0
                 session.position_at = time.monotonic()
         except Exception as e:
@@ -1163,6 +1235,11 @@ class MediaService:
 
     def close(self) -> None:
         self._running = False
+        if hasattr(self, "_poll_source") and self._poll_source:
+            try:
+                self._poll_source.destroy()
+            except Exception:
+                pass
         try:
             self._loop.quit()
         except Exception:

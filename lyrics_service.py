@@ -27,6 +27,7 @@ PIPES: re.Pattern[str] = re.compile(r"\s*\|[^|]*\|\s*|\s+\|\s.*$")
 CHANNEL: re.Pattern[str] = re.compile(r"\s*-\s*Topic$|\s*VEVO$", re.IGNORECASE)
 STAMPED: re.Pattern[str] = re.compile(r"^((?:\[\d+:\d+(?:\.\d+)?\])+)(.*)$")
 STAMP: re.Pattern[str] = re.compile(r"\[(\d+):(\d+(?:\.\d+)?)\]")
+OFFSET_TAG: re.Pattern[str] = re.compile(r"^\[offset:\s*([+-]?\d+)\]", re.IGNORECASE)
 
 @dataclass(frozen=True)
 class Candidate:
@@ -179,7 +180,7 @@ class LyricsService:
         best: list[tuple[float, str]] = []
         best_gap = self.TOLERANCE
         for c in candidates:
-            if c.end > duration + 1.0:
+            if c.end > duration + 3.5:
                 continue
             gap = abs(c.duration - duration)
             if gap > best_gap or (gap == best_gap and len(best) > 0):
@@ -190,7 +191,7 @@ class LyricsService:
         if not best:
             fallback_gap = 15.0
             for c in candidates:
-                if c.end > max(duration, c.duration) + 1.0:
+                if c.end > max(duration, c.duration) + 3.5:
                     continue
                 gap = abs(c.duration - duration)
                 if gap <= fallback_gap:
@@ -338,7 +339,109 @@ class LyricsService:
             if candidates:
                 return candidates
 
+        song = self.clean_title(title)
+        by = self.clean_artist(artist)
+
+        try:
+            self._fetch_netease(song, by, duration, add_candidate)
+            if candidates:
+                return candidates
+        except Exception as exc:
+            logger.debug("NetEase fetch error: %s", exc)
+
+        try:
+            self._fetch_lyrics_ovh(song, by, duration, candidates, seen)
+            if candidates:
+                return candidates
+        except Exception as exc:
+            logger.debug("Lyrics.ovh fetch error: %s", exc)
+
         return candidates
+
+    def _fetch_netease(
+        self,
+        song: str,
+        by: str,
+        duration: float,
+        add_candidate: Callable[[float, str], None],
+    ) -> None:
+        query = f"{by} {song}".strip() if by else song
+        if not query:
+            return
+        data = self._get_json(
+            "https://music-api.gdstudio.xyz/api.php",
+            params={
+                "types": "search",
+                "count": "3",
+                "source": "netease",
+                "pages": "1",
+                "name": query,
+            },
+        )
+        if not isinstance(data, list):
+            return
+        for item in data[:3]:
+            if not isinstance(item, dict):
+                continue
+            sid = item.get("id")
+            if not sid:
+                continue
+            lrc_data = self._get_json(
+                "https://music-api.gdstudio.xyz/api.php",
+                params={
+                    "types": "lyric",
+                    "id": str(sid),
+                    "source": "netease",
+                },
+            )
+            if isinstance(lrc_data, dict):
+                lrc_text = lrc_data.get("lyric")
+                if isinstance(lrc_text, str) and lrc_text.strip():
+                    dur = float(duration) if duration > 0.0 else 0.0
+                    add_candidate(dur, lrc_text)
+                    return
+
+    def _fetch_lyrics_ovh(
+        self,
+        song: str,
+        by: str,
+        duration: float,
+        candidates: list[Candidate],
+        seen: set[str],
+    ) -> None:
+        if not by or not song or duration <= 10.0:
+            return
+        url = f"https://api.lyrics.ovh/v1/{requests.utils.quote(by)}/{requests.utils.quote(song)}"
+        data = self._get_json(url)
+        if not isinstance(data, dict):
+            return
+        raw_lyrics = data.get("lyrics")
+        if not isinstance(raw_lyrics, str) or not raw_lyrics.strip():
+            return
+
+        raw_lines = [
+            line.strip()
+            for line in raw_lyrics.splitlines()
+            if line.strip() and not (line.strip().startswith("[") and line.strip().endswith("]"))
+        ]
+        if not raw_lines:
+            return
+
+        intro_t = min(12.0, duration * 0.1)
+        avail_t = max(10.0, duration - intro_t - min(12.0, duration * 0.08))
+        step_t = avail_t / max(1, len(raw_lines))
+
+        timed_lines: list[tuple[float, str]] = []
+        cur_t = intro_t
+        for txt in raw_lines:
+            timed_lines.append((round(cur_t, 2), txt))
+            cur_t += step_t
+
+        end = timed_lines[-1][0] if timed_lines else duration
+        fp = f"{duration:.1f}_{end:.1f}_{len(timed_lines)}"
+        if fp not in seen:
+            seen.add(fp)
+            candidates.append(Candidate(duration=duration, end=end, lines=timed_lines))
 
     def _get_json(self, url: str, params: dict[str, str] | None = None) -> Any:
         for attempt in range(2):
@@ -396,9 +499,19 @@ class LyricsService:
 
     @staticmethod
     def parse(lrc: str) -> list[tuple[float, str]]:
+        offset_sec = 0.0
         lines: list[tuple[float, str]] = []
         for raw in lrc.splitlines():
-            m = STAMPED.match(raw.strip())
+            s = raw.strip()
+            off_m = OFFSET_TAG.match(s)
+            if off_m:
+                try:
+                    offset_sec = float(off_m.group(1)) / 1000.0
+                except ValueError:
+                    pass
+                continue
+
+            m = STAMPED.match(s)
             if not m:
                 continue
 
@@ -407,8 +520,8 @@ class LyricsService:
                 try:
                     mins = int(stamp.group(1))
                     secs = float(stamp.group(2))
-                    seconds = mins * 60.0 + secs
-                    lines.append((round(seconds, 3), text))
+                    seconds = mins * 60.0 + secs + offset_sec
+                    lines.append((max(0.0, round(seconds, 3)), text))
                 except ValueError:
                     continue
 

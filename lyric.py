@@ -2,9 +2,10 @@
 from __future__ import annotations
 
 import logging
+import math
 from pathlib import Path
 import tempfile
-from typing import Any
+from typing import Any, Optional
 
 import cairo
 
@@ -14,6 +15,7 @@ FONT_SIZE: float = 14.0
 LINE_HEIGHT: float = 18.0
 MAX_LINES: int = 2
 EDGE: float = 26.0
+SWEEP_EDGE: float = 18.0
 DIM: float = 0.4
 SCALE: float = 0.94
 UNSUNG_OPACITY: float = 0.6
@@ -113,11 +115,12 @@ def measure_text(
     is_active: bool = True,
 ) -> tuple[float, float]:
     eff_font = font_size if is_active else font_size * SCALE
-    select_font(cr, font_size=eff_font, bold=is_active)
+    select_font(cr, font_size=font_size, bold=True)
+    canonical_rows = layout_lines(cr, text.strip() or "♪", max_w=max_w, max_lines=MAX_LINES)
+    rows_count = max(1, len(canonical_rows))
     line_h = eff_font * (LINE_HEIGHT / FONT_SIZE)
-    rows = layout_lines(cr, text.strip() or "♪", max_w=max_w, max_lines=MAX_LINES)
-    rows_count = max(1, len(rows))
-    max_row_w = max((adv for _, adv in rows), default=0.0)
+    select_font(cr, font_size=eff_font, bold=is_active)
+    max_row_w = max((cr.text_extents(r[0]).x_advance for r in canonical_rows), default=0.0)
     return (max_row_w, rows_count * line_h)
 
 class LyricLine:
@@ -193,6 +196,10 @@ class LyricLine:
         fade_edge: float = float(kwargs.get("fade_edge", FADE_EDGE))
         offset_x: float = float(kwargs.get("offset_x", 0.0))
         h: float = float(kwargs.get("h", 34.0))
+        alpha: float = float(kwargs.get("alpha", 1.0))
+        dim: float = float(kwargs.get("dim", 1.0))
+        progress: Optional[float] = kwargs.get("progress", None)
+        unsung: float = float(kwargs.get("unsung", DIM))
 
         if not text:
             return
@@ -217,22 +224,36 @@ class LyricLine:
         r = float(color[0])
         g = float(color[1])
         b = float(color[2])
-        a = float(color[3]) if len(color) > 3 else 1.0
+        a = (float(color[3]) if len(color) > 3 else 1.0) * alpha * dim
         cr.set_source_rgba(r, g, b, a)
         cr.move_to(text_x, baseline)
         cr.show_text(text)
         text_group = cr.pop_group()
 
+        cr.set_source(text_group)
+
+        if progress is not None:
+            p = max(0.0, min(1.0, float(progress)))
+            head = x + (max_w - text_w) / 2.0 + text_w * p if text_w <= max_w else text_x + text_w * p
+            grad = cairo.LinearGradient(head - SWEEP_EDGE, 0.0, head + SWEEP_EDGE, 0.0)
+            grad.add_color_stop_rgba(0.0, 1.0, 1.0, 1.0, a)
+            grad.add_color_stop_rgba(0.42, 1.0, 1.0, 1.0, a)
+            grad.add_color_stop_rgba(0.72, 1.0, 1.0, 1.0, a * (1.0 - (1.0 - unsung) * 0.45))
+            grad.add_color_stop_rgba(1.0, 1.0, 1.0, 1.0, a * unsung)
+            cr.mask(grad)
+            cr.restore()
+            return
+
         fade = min(fade_edge, max_w * 0.45)
         grad = cairo.LinearGradient(x, 0.0, x + max_w, 0.0)
         if fade > 0.5:
             grad.add_color_stop_rgba(0.0, 1.0, 1.0, 1.0, 0.0)
-            grad.add_color_stop_rgba(fade / max_w, 1.0, 1.0, 1.0, 1.0)
-            grad.add_color_stop_rgba(1.0 - fade / max_w, 1.0, 1.0, 1.0, 1.0)
+            grad.add_color_stop_rgba(fade / max_w, 1.0, 1.0, 1.0, a)
+            grad.add_color_stop_rgba(1.0 - fade / max_w, 1.0, 1.0, 1.0, a)
             grad.add_color_stop_rgba(1.0, 1.0, 1.0, 1.0, 0.0)
         else:
-            grad.add_color_stop_rgba(0.0, 1.0, 1.0, 1.0, 1.0)
-            grad.add_color_stop_rgba(1.0, 1.0, 1.0, 1.0, 1.0)
+            grad.add_color_stop_rgba(0.0, 1.0, 1.0, 1.0, a)
+            grad.add_color_stop_rgba(1.0, 1.0, 1.0, 1.0, a)
 
         cr.set_source(text_group)
         cr.mask(grad)
@@ -279,19 +300,21 @@ class LyricLine:
         display_text = text if text.strip() else "♪"
         alpha: float = float(kwargs.get("alpha", 1.0))
 
+        select_font(cr, font_size=font_size, bold=True)
+        canonical_rows = layout_lines(cr, display_text, max_w=w, max_lines=MAX_LINES)
+        if not canonical_rows:
+            canonical_rows = [("♪", cr.text_extents("♪").x_advance)]
+
         if not is_active:
             eff_font = font_size * SCALE
             select_font(cr, font_size=eff_font, bold=False)
             line_h = eff_font * (LINE_HEIGHT / FONT_SIZE)
-            rows = layout_lines(cr, display_text, max_w=w, max_lines=MAX_LINES)
-            if not rows:
-                rows = [("♪", cr.text_extents("♪").x_advance)]
-
-            total_h = len(rows) * line_h
+            total_h = len(canonical_rows) * line_h
             start_y = y + max(0.0, (h - total_h) / 2.0) if h > 0.0 else y
             ascent, descent, f_height = cr.font_extents()[:3]
 
-            for i, (row_str, adv) in enumerate(rows):
+            for i, (row_str, _) in enumerate(canonical_rows):
+                adv = cr.text_extents(row_str).x_advance
                 row_y = start_y + i * line_h
                 baseline = row_y + ascent + max(0.0, (line_h - f_height) / 2.0)
                 row_x = x + max(0.0, (w - adv) / 2.0)
@@ -302,15 +325,14 @@ class LyricLine:
                 cr.set_source_rgba(1.0, 1.0, 1.0, DIM * alpha)
                 cr.move_to(row_x, baseline)
                 cr.show_text(row_str)
+                cr.new_path()
                 cr.restore()
 
             return total_h
 
         select_font(cr, font_size=font_size, bold=True)
         line_h = font_size * (LINE_HEIGHT / FONT_SIZE)
-        rows = layout_lines(cr, display_text, max_w=w, max_lines=MAX_LINES)
-        if not rows:
-            rows = [("♪", cr.text_extents("♪").x_advance)]
+        rows = canonical_rows
 
         row_widths = [adv for _, adv in rows]
         total_dist = sum(row_widths) + EDGE * len(rows)
@@ -335,13 +357,17 @@ class LyricLine:
             cr.clip()
 
             cr.push_group()
-            cr.set_source_rgba(1.0, 1.0, 1.0, 1.0)
+            cr.set_source_rgba(1.0, 1.0, 1.0, alpha)
             cr.move_to(row_x, baseline)
             cr.show_text(row_str)
             text_group = cr.pop_group()
 
-            grad = cairo.LinearGradient(row_x + from_x, 0.0, row_x + from_x + EDGE, 0.0)
+            head = row_x + from_x
+            grad = cairo.LinearGradient(head - SWEEP_EDGE * 1.6, 0.0, head + SWEEP_EDGE * 2.2, 0.0)
             grad.add_color_stop_rgba(0.0, 1.0, 1.0, 1.0, alpha)
+            grad.add_color_stop_rgba(0.46, 1.0, 1.0, 1.0, alpha)
+            grad.add_color_stop_rgba(0.68, 1.0, 1.0, 1.0, alpha * (1.0 - (1.0 - unsung_opacity) * 0.4))
+            grad.add_color_stop_rgba(0.88, 1.0, 1.0, 1.0, alpha * (unsung_opacity + (1.0 - unsung_opacity) * 0.45))
             grad.add_color_stop_rgba(1.0, 1.0, 1.0, 1.0, alpha * unsung_opacity)
 
             cr.set_source(text_group)
@@ -349,6 +375,46 @@ class LyricLine:
             cr.restore()
 
         return total_h
+
+def render_wait(
+    cr: cairo.Context,
+    cx: float,
+    cy: float,
+    progress: float = 0.0,
+    alpha: float = 1.0,
+    now: float = 0.0,
+    radius: float = 13.0,
+    tint: tuple[float, float, float] = (1.0, 1.0, 1.0),
+) -> None:
+    p = max(0.0, min(1.0, float(progress)))
+    cr.save()
+    cr.new_path()
+    cr.set_line_cap(cairo.LINE_CAP_ROUND)
+    cr.set_line_width(1.6)
+    cr.new_sub_path()
+    cr.arc(cx, cy, radius, 0.0, math.pi * 2.0)
+    cr.set_source_rgba(tint[0], tint[1], tint[2], 0.14 * alpha)
+    cr.stroke()
+
+    if p > 0.001:
+        cr.new_sub_path()
+        cr.arc(cx, cy, radius, -math.pi / 2.0, -math.pi / 2.0 + math.pi * 2.0 * p)
+        cr.set_source_rgba(tint[0], tint[1], tint[2], 0.5 * alpha)
+        cr.stroke()
+
+    r_dot = 2.6
+    gap = 7.0
+    beat = 0.5 + 0.5 * math.sin(now * 3.4)
+    for i in (-1, 0, 1):
+        phase = 0.5 + 0.5 * math.sin(now * 3.4 - i * 0.9)
+        dx = cx + i * gap
+        cr.new_sub_path()
+        cr.arc(dx, cy, r_dot * (0.72 + 0.28 * phase), 0.0, math.pi * 2.0)
+        cr.set_source_rgba(tint[0], tint[1], tint[2], (0.22 + 0.5 * phase) * alpha)
+        cr.fill()
+
+    cr.new_path()
+    cr.restore()
 
 Lyric = LyricLine
 render_compact = LyricLine.render_compact

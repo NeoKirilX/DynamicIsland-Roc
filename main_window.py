@@ -6,6 +6,7 @@ import ctypes
 import datetime
 import math
 import os
+import re
 import sys
 import time
 from enum import Enum, auto
@@ -38,14 +39,14 @@ from equalizer import Equalizer
 from goo import Goo
 from headset import get_headset_charge
 from icon import Glyph, render_battery, render_icon
-from lyric import LyricLine, measure_text, select_font
+from lyric import LyricLine, measure_text, render_wait, select_font
 from lyrics_service import LyricsService
 from media_service import MediaService
 from native_wayland import is_ctrl_down, is_fullscreen
 from network_service import Link, NetworkService, State
 from ring import Ring
 from row_list import RowList
-from settings import Settings
+from settings import MATERIAL_LIQUID, MATERIAL_MATTE, MATERIAL_NONE, Settings
 from spectrum_service import SpectrumService
 from spring import Spring
 from timer_service import Countdown
@@ -95,6 +96,9 @@ class Dims:
     def with_h(self, h: float) -> Dims:
         return Dims(self.w, h, self.r)
 
+LOOK_WIDTH = 320.0
+LOOK_HEIGHT = 420.0
+
 SIZES: dict[View, Dims] = {
     View.IDLE: Dims(118, 34, 17),
     View.MEDIA: Dims(210, 34, 17),
@@ -109,11 +113,15 @@ SIZES: dict[View, Dims] = {
     View.TIMER_SET: Dims(300, 190, 38),
     View.MENU: Dims(300, 208, 34),
     View.SETTINGS: Dims(320, 374, 34),
-    View.LOOK: Dims(320, 208, 34),
+    View.LOOK: Dims(LOOK_WIDTH, LOOK_HEIGHT, 34),
 }
 
 SCALES: list[int] = [85, 100, 115, 130]
 GAPS: list[int] = [0, 4, 8, 12, 16, 24]
+RADII: list[int] = [0, 25, 50, 75, 100]
+HEIGHTS: list[int] = [0, 4, 8, 12, 16]
+TEXT_SCALES: list[int] = [80, 90, 100, 115, 130]
+GLASS_LEVELS: list[int] = [20, 40, 60, 70, 85, 100]
 BUBBLE_WIDTH = 78.0
 BUBBLE_HEIGHT = 34.0
 BUBBLE_GAP = 7.0
@@ -136,11 +144,27 @@ LYRIC_INSET = 77.0
 LYRIC_EDGE = 8.0
 PLAYER_HEIGHT = 176.0
 PLAYER_LYRIC_ROOM = 74.0
+PLAYER_LYRIC_W = 340.0
 PLAYER_LYRIC_GAP = 4.0
 PLAYER_LYRIC_PAD = 8.0
+WAIT_ROW_H = 22.0
 LYRIC_COMPACT_FONT = 13.0
 PLAYER_LYRIC_FONT = 14.0
+
+
+def compact_lyric_font() -> float:
+    return LYRIC_COMPACT_FONT * Settings.text_factor()
+
+
+def player_lyric_font() -> float:
+    return PLAYER_LYRIC_FONT * Settings.text_factor()
 LYRIC_SPEED = 36.0
+LYRIC_LEAD = 0.2
+LYRIC_LOOKAHEAD = 1.8
+LYRIC_ARM_BEFORE = 2.0
+LYRIC_DIM_ARM = 0.45
+LYRIC_ENTER_SHIFT = 7.0
+LYRIC_EXIT_SHIFT = -6.0
 COLLAPSE_DELAY_SEC = 0.55
 BUBBLE_LINGER_SEC = 2.5
 AWAY_FOR_SEC = 5.0
@@ -220,7 +244,7 @@ def draw_text(
 ) -> float:
     if not text or alpha <= 0.0:
         return 0.0
-    select_font(cr, font_size=font_size, bold=bold)
+    select_font(cr, font_size=font_size * Settings.text_factor(), bold=bold)
     disp = text
     if max_w is not None and max_w > 0:
         ext = cr.text_extents(disp)
@@ -248,6 +272,7 @@ def draw_text(
     cr.set_source_rgba(r, g, b, a)
     cr.move_to(draw_x, draw_y)
     cr.show_text(disp)
+    cr.new_path()
     return ext.width
 
 _IMAGE_SURFACE_CACHE: dict[str, cairo.ImageSurface] = {}
@@ -440,16 +465,28 @@ class MainWindow(Gtk.Window):
         self._media_width = MEDIA_WIDTH
         self._player_room = False
         self._player_lyric_h = PLAYER_LYRIC_ROOM
+        self._player_col = Spring(0.0, 170.0, 26.0)
+        self._player_last_active: int = -1
+        self._player_prev_active: int = -1
+        self._player_active_spring = Spring(1.0, 160.0, 22.0)
+        self._player_rows_cache: Optional[tuple[object, list[tuple[float, str, float, float, float]]]] = None
+        self._compact_lines_cache: Optional[tuple[object, list[tuple[float, str]]]] = None
         self._lyric_scroll = 0.0
         self._lyric_overflow = 0.0
         self._lyric_span = 0.0
         self._lyric_line_start = 0.0
+        self._lyric_target: Optional[tuple[str, float, float, bool]] = None
+        self._lyric_enter = Spring(1.0, 220.0, 26.0)
+        self._lyric_prev_alpha = Spring(0.0, 220.0, 26.0)
+        self._lyric_prev_text = ""
+        self._lyric_prev_target: Optional[tuple[str, float, float, bool]] = None
         self._skip_direction = 1
         self._skip_at = -SKIP_MEMORY
         self._source_at = -SKIP_MEMORY
         self._source_app_name = ""
         self._last_track_key = ""
         self._last_lyric_text = ""
+        self._last_lyric_key: Optional[tuple[Optional[float], str]] = None
 
         self._btn_prev_rect: tuple[float, float, float, float] = (0, 0, 0, 0)
         self._btn_play_rect: tuple[float, float, float, float] = (0, 0, 0, 0)
@@ -470,8 +507,10 @@ class MainWindow(Gtk.Window):
         self._ready = True
         GLib.idle_add(self._initial_media_sync, None)
 
+        self._goo.set_glass(Settings.glass / 100.0)
         self.update_clock()
         self.sync_accent()
+        self.sync_rim(snap=True)
         self.update_view()
         self.set_targets()
 
@@ -623,7 +662,7 @@ class MainWindow(Gtk.Window):
             row_y_start = py + 44.0
             row_h = 40.0
             hovered = None
-            for idx in range(2):
+            for idx in range(8):
                 ry = row_y_start + idx * row_h
                 if px + 10 <= lx <= px + pw - 10 and ry <= ly < ry + row_h:
                     hovered = idx
@@ -851,28 +890,78 @@ class MainWindow(Gtk.Window):
                 self.set_targets()
                 return
 
-            if px + 10 <= lx <= px + pw - 10 and py + 44 <= ly < py + 84:
-                idx = SCALES.index(Settings.scale) if Settings.scale in SCALES else 1
-                new_scale = SCALES[(idx + 1) % len(SCALES)]
-                self.set_scale(new_scale)
-                return
+            row_y_start = py + 44.0
+            row_h = 40.0
 
-            if px + 10 <= lx <= px + pw - 10 and py + 84 <= ly < py + 124:
-                idx = GAPS.index(Settings.gap) if Settings.gap in GAPS else 2
-                new_gap = GAPS[(idx + 1) % len(GAPS)]
-                self.set_gap(new_gap)
-                return
+            if px + 10 <= lx <= px + pw - 10:
+                if row_y_start <= ly < row_y_start + row_h:
+                    idx = SCALES.index(Settings.scale) if Settings.scale in SCALES else 1
+                    new_scale = SCALES[(idx + 1) % len(SCALES)]
+                    self.set_scale(new_scale)
+                    return
 
-            swatch_y = py + 160.0
-            swatch_h = 30.0
+                if row_y_start + row_h <= ly < row_y_start + 2 * row_h:
+                    idx = GAPS.index(Settings.gap) if Settings.gap in GAPS else 2
+                    new_gap = GAPS[(idx + 1) % len(GAPS)]
+                    self.set_gap(new_gap)
+                    return
+
+                if row_y_start + 2 * row_h <= ly < row_y_start + 3 * row_h:
+                    idx = RADII.index(Settings.radius) if Settings.radius in RADII else -1
+                    if idx >= 0:
+                        new_radius = RADII[(idx + 1) % len(RADII)]
+                    else:
+                        new_radius = next((r for r in RADII if r > Settings.radius), RADII[0])
+                    self.set_radius(new_radius)
+                    return
+
+                if row_y_start + 3 * row_h <= ly < row_y_start + 4 * row_h:
+                    idx = HEIGHTS.index(Settings.height) if Settings.height in HEIGHTS else -1
+                    if idx >= 0:
+                        new_h = HEIGHTS[(idx + 1) % len(HEIGHTS)]
+                    else:
+                        new_h = next((h for h in HEIGHTS if h > Settings.height), HEIGHTS[0])
+                    self.set_height(new_h)
+                    return
+
+                if row_y_start + 4 * row_h <= ly < row_y_start + 5 * row_h:
+                    idx = TEXT_SCALES.index(Settings.text_scale) if Settings.text_scale in TEXT_SCALES else -1
+                    if idx >= 0:
+                        new_ts = TEXT_SCALES[(idx + 1) % len(TEXT_SCALES)]
+                    else:
+                        new_ts = next((ts for ts in TEXT_SCALES if ts > Settings.text_scale), TEXT_SCALES[0])
+                    self.set_text_scale(new_ts)
+                    return
+
+                if row_y_start + 5 * row_h <= ly < row_y_start + 6 * row_h:
+                    modes = [MATERIAL_LIQUID, MATERIAL_MATTE, MATERIAL_NONE]
+                    cur_idx = modes.index(Settings.material) if Settings.material in modes else 0
+                    new_mat = modes[(cur_idx + 1) % len(modes)]
+                    self.set_material(new_mat)
+                    return
+
+                if row_y_start + 6 * row_h <= ly < row_y_start + 7 * row_h:
+                    idx = GLASS_LEVELS.index(Settings.glass) if Settings.glass in GLASS_LEVELS else -1
+                    if idx >= 0:
+                        new_glass = GLASS_LEVELS[(idx + 1) % len(GLASS_LEVELS)]
+                    else:
+                        new_glass = next((g for g in GLASS_LEVELS if g > Settings.glass), GLASS_LEVELS[0])
+                    self.set_glass(new_glass)
+                    return
+
+                if row_y_start + 7 * row_h <= ly < row_y_start + 8 * row_h:
+                    colors = [c[0] for c in LOOK_COLORS]
+                    cur_idx = colors.index(Settings.accent) if Settings.accent in colors else 0
+                    new_accent = colors[(cur_idx + 1) % len(colors)]
+                    self.set_accent(new_accent)
+                    return
+
+            swatch_y = row_y_start + 8 * row_h + 18.0
             step_x = (pw - 20.0) / len(LOOK_COLORS)
-            for idx, (col, _) in enumerate(LOOK_COLORS):
-                sx = px + 10.0 + idx * step_x + step_x / 2.0
-                if sx - 14 <= lx <= sx + 14 and swatch_y <= ly <= swatch_y + swatch_h:
-                    Settings.accent = col
-                    self.sync_accent()
-                    self.sync_rim()
-                    self.area.queue_draw()
+            if swatch_y - 15.0 <= ly <= swatch_y + 15.0 and px + 10.0 <= lx <= px + pw - 10.0:
+                idx = int((lx - (px + 10.0)) / step_x)
+                if 0 <= idx < len(LOOK_COLORS):
+                    self.set_accent(LOOK_COLORS[idx][0])
                     return
 
         if self._panel != Panel.NONE:
@@ -904,15 +993,53 @@ class MainWindow(Gtk.Window):
         px, py, pw, ph, _, _ = self._get_pill_and_bubble_rects()
 
         if self._current_view == View.LOOK:
-            if py + 44 <= ly < py + 84:
+            row_y_start = py + 44.0
+            row_h = 40.0
+
+            if row_y_start <= ly < row_y_start + row_h:
                 idx = SCALES.index(Settings.scale) if Settings.scale in SCALES else 1
                 new_idx = max(0, min(len(SCALES) - 1, idx + step))
                 self.set_scale(SCALES[new_idx])
                 return True
-            if py + 84 <= ly < py + 124:
+
+            if row_y_start + row_h <= ly < row_y_start + 2 * row_h:
                 idx = GAPS.index(Settings.gap) if Settings.gap in GAPS else 2
                 new_idx = max(0, min(len(GAPS) - 1, idx + step))
                 self.set_gap(GAPS[new_idx])
+                return True
+
+            if row_y_start + 2 * row_h <= ly < row_y_start + 3 * row_h:
+                new_radius = max(0, min(100, Settings.radius + step * 5))
+                self.set_radius(new_radius)
+                return True
+
+            if row_y_start + 3 * row_h <= ly < row_y_start + 4 * row_h:
+                new_h = max(0, min(16, Settings.height + step))
+                self.set_height(new_h)
+                return True
+
+            if row_y_start + 4 * row_h <= ly < row_y_start + 5 * row_h:
+                new_ts = max(80, min(130, Settings.text_scale + step * 5))
+                self.set_text_scale(new_ts)
+                return True
+
+            if row_y_start + 5 * row_h <= ly < row_y_start + 6 * row_h:
+                modes = [MATERIAL_LIQUID, MATERIAL_MATTE, MATERIAL_NONE]
+                cur_idx = modes.index(Settings.material) if Settings.material in modes else 0
+                new_idx = max(0, min(len(modes) - 1, cur_idx - step))
+                self.set_material(modes[new_idx])
+                return True
+
+            if row_y_start + 6 * row_h <= ly < row_y_start + 7 * row_h:
+                new_glass = max(20, min(100, Settings.glass + step * 5))
+                self.set_glass(new_glass)
+                return True
+
+            if row_y_start + 7 * row_h <= ly:
+                colors = [c[0] for c in LOOK_COLORS]
+                cur_idx = colors.index(Settings.accent) if Settings.accent in colors else 0
+                new_idx = max(0, min(len(colors) - 1, cur_idx + step))
+                self.set_accent(colors[new_idx])
                 return True
 
         if self._current_view == View.MEDIA_BIG and Settings.app_volume:
@@ -987,7 +1114,8 @@ class MainWindow(Gtk.Window):
             self._seek_x.value = 0.0
             self._seek_x.velocity = 0.0
         elif target == View.MEDIA:
-            self.update_lyric(snap=True)
+            snap = self._previous_view not in (View.TOAST, View.IDLE) and self._last_lyric_key is not None
+            self.update_lyric(snap=snap)
 
         to_dims = self.size_of(target)
         growing = (to_dims.w * to_dims.h) >= (from_dims.w * from_dims.h)
@@ -1004,14 +1132,16 @@ class MainWindow(Gtk.Window):
             return d.with_w(self._media_width)
         if view == View.MEDIA_BIG and self._player_room:
             return d.with_h(PLAYER_HEIGHT + self._player_lyric_h)
+        if view == View.LOOK:
+            return Dims(LOOK_WIDTH, LOOK_HEIGHT, 34)
         return d
 
     def set_targets(self) -> None:
         d = self.size_of(self._current_view)
         compact = d.h < 40.0
         self._w.target = d.w
-        self._h.target = d.h
-        self._r.target = d.r
+        self._h.target = d.h + Settings.height
+        self._r.target = d.r * Settings.radius / 100.0
 
         self._split.target = 1.0 if (self._timer.active and compact and self._current_view != View.TIMER) else 0.0
 
@@ -1071,15 +1201,22 @@ class MainWindow(Gtk.Window):
     def sync_accent(self) -> None:
         self._accent_color = self.accent
 
-    def sync_rim(self) -> None:
+    def sync_rim(self, snap: bool = False) -> None:
         music = (
             self._media.has_track
-            and (self.media_active or self._current_view == View.MEDIA_BIG)
+            and (self.media_active or self._current_view in (View.MEDIA, View.MEDIA_BIG, View.TOAST))
         )
-        tint = self.accent if (Settings.rim and music) else None
-        if tint != self._rim_tint:
+        if not Settings.rim:
+            tint = None
+        elif Settings.accent is not None:
+            tint = Settings.accent
+        elif music:
+            tint = self._media.accent
+        else:
+            tint = None
+        if tint != self._rim_tint or snap:
             self._rim_tint = tint
-            self._goo.tint(tint, duration_sec=0.45)
+            self._goo.tint(tint, duration_sec=0.0 if snap else 0.45)
 
     def sync_spectrum(self) -> None:
         visible = self._current_view in (View.MEDIA, View.TOAST, View.MEDIA_BIG)
@@ -1117,8 +1254,19 @@ class MainWindow(Gtk.Window):
             moving |= self._seek_x.advance(dt)
             moving |= self._seek_h.advance(dt)
 
+        if self._current_view == View.MEDIA_BIG:
+            moving |= self._player_col.advance(dt)
+            moving |= self._player_active_spring.advance(dt)
+
         if self._current_view == View.MEDIA and self._lyric_overflow > 0.0 and Settings.lyrics:
             moving |= self._advance_lyric_scroll(dt)
+
+        if self._current_view == View.MEDIA and Settings.lyrics:
+            moving |= self._lyric_enter.advance(dt)
+            moving |= self._lyric_prev_alpha.advance(dt)
+            if self._lyric_prev_alpha.value <= 0.0:
+                self._lyric_prev_text = ""
+                self._lyric_prev_target = None
 
         if self._current_view in (View.MEDIA, View.TOAST, View.MEDIA_BIG):
             bands = self._spectrum.get_bands()
@@ -1372,7 +1520,27 @@ class MainWindow(Gtk.Window):
 
         if new_track:
             self._player_lyric_h = PLAYER_LYRIC_ROOM
+            self._player_col.value = 0.0
+            self._player_col.target = 0.0
+            self._player_last_active = -1
+            self._player_prev_active = -1
+            self._player_active_spring.value = 1.0
+            self._player_active_spring.target = 1.0
+            self._player_rows_cache = None
+            self._compact_lines_cache = None
             self._lyric_scroll = 0.0
+            self._last_lyric_key = None
+            self._last_lyric_text = ""
+            self._lyric_target = None
+            self._lyric_prev_text = ""
+            self._lyric_prev_target = None
+            self._lyric_prev_alpha.value = 0.0
+            self._lyric_prev_alpha.target = 0.0
+            self._lyric_enter.value = 0.0
+            self._lyric_enter.target = 1.0
+            self._lyric_overflow = 0.0
+            self._lyric_span = 0.0
+            self._lyric_line_start = 0.0
 
         asked = time.monotonic() - self._source_at < SKIP_MEMORY
         source = self._media.source
@@ -1413,7 +1581,147 @@ class MainWindow(Gtk.Window):
             self._lyrics.track(self._media.title, self._media.artist, self._media.duration)
         else:
             self._lyrics.clear()
+            self._compact_lines_cache = None
             self._last_lyric_text = ""
+            self._last_lyric_key = None
+            self._lyric_target = None
+            self._lyric_prev_text = ""
+            self._lyric_prev_target = None
+            self._lyric_prev_alpha.value = 0.0
+            self._lyric_prev_alpha.target = 0.0
+            self._lyric_enter.value = 1.0
+            self._lyric_enter.target = 1.0
+
+    BRACKETS_PUNCT = '()[]{}\"\'«».,;!?-—– '
+
+    @classmethod
+    def _normalize_phrase(cls, p: str) -> str:
+        return re.sub(r'[\s.,!?;:\"\'—–\-\(\)\[\]\{\}«»]+', '', p.lower())
+
+    @classmethod
+    def _clean_phrase(cls, p: str) -> str:
+        return p.strip().strip(cls.BRACKETS_PUNCT).strip()
+
+    @classmethod
+    def _split_phrase_line(cls, text: str) -> list[str]:
+        s = text.strip()
+        if (s.startswith("(") and s.endswith(")")) or (s.startswith("[") and s.endswith("]")) or (s.startswith("{") and s.endswith("}")):
+            s = s[1:-1].strip()
+        parts = [cls._clean_phrase(p) for p in re.split(r'[,;!?]+\s*', s) if cls._clean_phrase(p)]
+        if len(parts) > 1:
+            norm0 = cls._normalize_phrase(parts[0])
+            if norm0 and all(cls._normalize_phrase(p) == norm0 for p in parts):
+                return parts
+        clean_full = cls._clean_phrase(text)
+        return [clean_full] if clean_full else []
+
+    @classmethod
+    def _process_compact_lines(cls, raw_lines: list[tuple[float, str]], duration: float) -> list[tuple[float, str]]:
+        if not raw_lines:
+            return []
+        expanded: list[tuple[float, str, float, bool, str]] = []
+        for idx, (t, txt) in enumerate(raw_lines):
+            if not txt.strip():
+                expanded.append((t, txt, 0.0, False, txt))
+                continue
+            parts = cls._split_phrase_line(txt)
+            next_t = raw_lines[idx + 1][0] if idx + 1 < len(raw_lines) else max(duration, t + 4.0)
+            line_span = max(0.5, next_t - t)
+
+            if len(parts) > 1:
+                step = line_span / len(parts)
+                for k, p in enumerate(parts):
+                    expanded.append((round(t + k * step, 3), p, round(step, 3), True, txt))
+            else:
+                expanded.append((t, txt, round(line_span, 3), False, txt))
+
+        result: list[tuple[float, str]] = []
+        i = 0
+        while i < len(expanded):
+            item = expanded[i]
+            t, txt = item[0], item[1]
+            if not txt.strip():
+                result.append((t, txt))
+                i += 1
+                continue
+
+            norm = cls._normalize_phrase(txt)
+            j = i
+            while j < len(expanded) and cls._normalize_phrase(expanded[j][1]) == norm:
+                j += 1
+
+            count = j - i
+            if count >= 4:
+                for k in range(i, j):
+                    sub_t, sub_txt = expanded[k][0], expanded[k][1]
+                    clean_sub = cls._clean_phrase(sub_txt)
+                    result.append((sub_t, f"{clean_sub} х{k - i + 1}"))
+                i = j
+            else:
+                k = i
+                while k < j:
+                    orig_txt = expanded[k][4]
+                    orig_t = expanded[k][0]
+                    if expanded[k][3]:
+                        m = k
+                        while m < j and expanded[m][3] and expanded[m][4] == orig_txt:
+                            m += 1
+                        result.append((orig_t, orig_txt))
+                        k = m
+                    else:
+                        result.append((orig_t, orig_txt))
+                        k += 1
+                i = j
+
+        return result
+
+    def compact_lyric_lines(self) -> list[tuple[float, str]]:
+        raw = self._lyrics.for_duration(self._media.duration)
+        if not raw:
+            return []
+        cached = self._compact_lines_cache
+        if cached is not None and cached[0] is raw:
+            return cached[1]
+        processed = self._process_compact_lines(raw, self._media.duration)
+        self._compact_lines_cache = (raw, processed)
+        return processed
+
+    def compact_lyric_target(self) -> Optional[tuple[str, float, float, bool]]:
+        raw_lines = self._lyrics.for_duration(self._media.duration)
+        if not raw_lines:
+            return None
+
+        lines = self.compact_lyric_lines()
+        at = self._media.position + LYRIC_LEAD
+
+        if len(lines) != len(raw_lines):
+            idx = -1
+            for i, (line_t, line_text) in enumerate(lines):
+                if line_t <= at:
+                    idx = i
+                else:
+                    break
+            current = lines[idx] if idx >= 0 else None
+        else:
+            idx, current = self._lyrics.get_current_line(self._media.position, self._media.duration, lead=LYRIC_LEAD)
+            if idx >= 0 and idx < len(lines):
+                current = lines[idx]
+
+        def end_of(index: int) -> float:
+            if index + 1 < len(lines):
+                return lines[index + 1][0]
+            return max(self._media.duration, lines[index][0] + 4.0)
+
+        if current is not None and current[1].strip():
+            return (current[1], current[0], end_of(idx), at >= current[0])
+
+        start = idx + 1 if idx >= 0 else 0
+        for j in range(start, len(lines)):
+            line_t, line_text = lines[j]
+            if line_text.strip() and line_t - at <= LYRIC_LOOKAHEAD:
+                return (line_text, line_t, end_of(j), False)
+
+        return None
 
     def update_lyric(self, snap: bool = False) -> None:
         if self._current_view == View.MEDIA_BIG:
@@ -1421,21 +1729,35 @@ class MainWindow(Gtk.Window):
         if self._current_view != View.MEDIA:
             return
 
-        lines = self._lyrics.for_duration(self._media.duration)
-        idx, current_line = self._lyrics.get_current_line(self._media.position, self._media.duration, lead=0.2)
-        text = current_line[1] if current_line else (self._media.title if self._media.has_track else "")
+        target = self.compact_lyric_target()
+        text = target[0] if target else (self._media.title if self._media.has_track else "")
+        target_t = target[1] if target else None
+        line_key = (target_t, text)
 
-        if text != self._last_lyric_text or snap:
+        if line_key != self._last_lyric_key or snap:
+            if not snap and self._last_lyric_text:
+                self._lyric_prev_text = self._last_lyric_text
+                self._lyric_prev_target = self._lyric_target
+                self._lyric_prev_alpha.value = min(0.6, max(self._lyric_prev_alpha.value, 0.25))
+                self._lyric_prev_alpha.target = 0.0
+            else:
+                self._lyric_prev_text = ""
+                self._lyric_prev_target = None
+                self._lyric_prev_alpha.value = 0.0
+                self._lyric_prev_alpha.target = 0.0
+
+            self._lyric_target = target
+            self._lyric_enter.value = 1.0 if snap else 0.0
+            self._lyric_enter.target = 1.0
+            self._last_lyric_key = line_key
             self._last_lyric_text = text
             if text:
-                select_font(_MEASURE_CR, font_size=LYRIC_COMPACT_FONT, bold=True)
+                select_font(_MEASURE_CR, font_size=compact_lyric_font(), bold=True)
                 tw = _MEASURE_CR.text_extents(text).x_advance
                 self._lyric_span = 0.0
-                self._lyric_line_start = 0.0
-                if idx >= 0 and idx < len(lines):
-                    self._lyric_line_start = lines[idx][0]
-                    if idx + 1 < len(lines):
-                        self._lyric_span = max(0.3, lines[idx + 1][0] - lines[idx][0])
+                self._lyric_line_start = target[1] if target else 0.0
+                if target and target[3]:
+                    self._lyric_span = max(0.3, target[2] - target[1])
                 self._media_width = max(
                     MEDIA_WIDTH,
                     min(MEDIA_MAX_WIDTH, tw + 2 * LYRIC_EDGE + LYRIC_INSET + 2.0),
@@ -1453,6 +1775,29 @@ class MainWindow(Gtk.Window):
             if not snap:
                 self._w.tune(280, 30)
             self.set_targets()
+        elif target != self._lyric_target:
+            self._lyric_target = target
+            at = self._media.position + LYRIC_LEAD
+            if target and (target[3] or at >= target[1]):
+                self._lyric_span = max(0.3, target[2] - target[1])
+                self._lyric_line_start = target[1]
+            self.area.queue_draw()
+
+    def lyric_phase(
+        self,
+        target: Optional[tuple[str, float, float, bool]],
+    ) -> tuple[Optional[float], float]:
+        if target is None:
+            return (None, 1.0)
+        _text, start_t, end_t, started = target
+        at = self._media.position + LYRIC_LEAD
+        if started or at >= start_t:
+            span = max(0.5, end_t - start_t)
+            return (max(0.0, min(1.0, (at - start_t) / span)), 1.0)
+        until = start_t - at
+        if until > LYRIC_ARM_BEFORE:
+            return (None, 1.0)
+        return (None, LYRIC_DIM_ARM)
 
     def _advance_lyric_scroll(self, dt: float) -> bool:
         span = self._lyric_span if self._lyric_span > 0.0 else 3.0
@@ -1492,6 +1837,9 @@ class MainWindow(Gtk.Window):
     def stop_timer(self) -> None:
         self._timer.stop()
         self.set_urgent(False)
+        self._split.target = 0.0
+        self.update_view()
+        self.set_targets()
 
     def sync_timer(self) -> None:
         self.update_timer()
@@ -1520,7 +1868,7 @@ class MainWindow(Gtk.Window):
         self.stop_timer()
         self._ringing = True
         self._alarm.ring()
-        self.notify(Glyph.Bell, COLOR_ORANGE, "Таймер", f"Время вышло · {total_span}", seconds=12.0, force=True)
+        self.notify(Glyph.Bell, COLOR_ORANGE, "Таймер", f"Время вышло · {total_span}", seconds=3.5, force=True)
         self.set_targets()
 
     def quiet_alarm(self) -> None:
@@ -1546,6 +1894,35 @@ class MainWindow(Gtk.Window):
         self._gap.target = float(px)
         self.set_targets()
 
+    def set_radius(self, percent: int) -> None:
+        Settings.radius = percent
+        self.set_targets()
+
+    def set_height(self, px: int) -> None:
+        Settings.height = px
+        self.set_targets()
+
+    def set_text_scale(self, percent: int) -> None:
+        Settings.text_scale = percent
+        self.update_lyric(snap=True)
+        self.area.queue_draw()
+
+    def set_material(self, mat: str) -> None:
+        Settings.material = mat
+        self._goo.set_mode(mat, 0.35)
+        self.area.queue_draw()
+
+    def set_glass(self, percent: int) -> None:
+        Settings.glass = percent
+        self._goo.set_glass(percent / 100.0)
+        self.area.queue_draw()
+
+    def set_accent(self, col: Optional[Tuple[float, float, float]]) -> None:
+        Settings.accent = col
+        self.sync_accent()
+        self.sync_rim()
+        self.area.queue_draw()
+
     def exit_island(self) -> None:
         self._alarm.stop()
         self.get_application().quit()
@@ -1561,8 +1938,8 @@ class MainWindow(Gtk.Window):
         size = max(0.01, self._size.value)
         scale = max(0.01, self._scale.value)
         w = max(24.0, self._w.value)
-        h = max(24.0, self._h.value)
-        r = min(w / 2.0, min(h / 2.0, max(0.0, self._r.value)))
+        h = max(24.0, self._h.value + Settings.height)
+        r = min(w / 2.0, min(h / 2.0, max(0.0, self._r.value * Settings.radius / 100.0)))
 
         cx = width / 2.0
         offset_y = self._offset.value + self._gap.value / size
@@ -1599,6 +1976,8 @@ class MainWindow(Gtk.Window):
             cr.restore()
 
         self._goo.shape(pill_rect, r, bubble_rect if apart else None)
+        self._goo.set_mode(Settings.material, 0.35)
+        self._goo.set_glass(Settings.glass / 100.0)
         self._goo.render(cr, dt)
 
         cr.save()
@@ -1735,22 +2114,44 @@ class MainWindow(Gtk.Window):
         mid_x = art_x + art_size + 7.0
         mid_w = eq_x - mid_x - 7.0
         if mid_w > 10.0:
-            lines = self._lyrics.for_duration(self._media.duration)
-            _, current_line = self._lyrics.get_current_line(self._media.position, self._media.duration, lead=0.2)
-            has_lyric = bool(current_line and current_line[1].strip())
-            lyric_text = current_line[1] if has_lyric else self._media.title
+            target = self._lyric_target
+            lyric_text = target[0] if target else (self._media.title if self._media.has_track else "")
+            has_lyric = target is not None and bool(lyric_text.strip())
 
             if has_lyric and Settings.lyrics:
+                prev_a = self._lyric_prev_alpha.value
+                if prev_a > 0.01 and self._lyric_prev_text:
+                    p_prev, d_prev = self.lyric_phase(self._lyric_prev_target)
+                    LyricLine.render_compact(
+                        cr,
+                        self._lyric_prev_text,
+                        mid_x,
+                        py + LYRIC_EXIT_SHIFT * (1.0 - prev_a),
+                        mid_w,
+                        COLOR_WHITE,
+                        font_size=compact_lyric_font(),
+                        offset_x=self._lyric_scroll if self._lyric_prev_target == target else 0.0,
+                        h=ph,
+                        alpha=prev_a * alpha,
+                        dim=d_prev,
+                        progress=p_prev,
+                    )
+
+                enter = self._lyric_enter.value
+                prog, dim = self.lyric_phase(target)
                 LyricLine.render_compact(
                     cr,
                     lyric_text,
                     mid_x,
-                    py,
+                    py + LYRIC_ENTER_SHIFT * (1.0 - enter),
                     mid_w,
                     COLOR_WHITE,
-                    font_size=LYRIC_COMPACT_FONT,
+                    font_size=compact_lyric_font(),
                     offset_x=self._lyric_scroll,
                     h=ph,
+                    alpha=enter * alpha,
+                    dim=dim,
+                    progress=prog,
                 )
             else:
                 draw_text(
@@ -1758,7 +2159,7 @@ class MainWindow(Gtk.Window):
                     lyric_text,
                     mid_x + mid_w / 2.0,
                     py + ph / 2.0,
-                    font_size=LYRIC_COMPACT_FONT,
+                    font_size=compact_lyric_font(),
                     bold=True,
                     color=COLOR_DIM[:3] if has_lyric else COLOR_WHITE,
                     alpha=alpha,
@@ -1961,6 +2362,205 @@ class MainWindow(Gtk.Window):
             max_w=mid_w,
         )
 
+    def player_lyric_rows(self) -> list[tuple[float, str, float, float, float]]:
+        lines = self._lyrics.for_duration(self._media.duration)
+        cached = self._player_rows_cache
+        if cached is not None and cached[0] is lines:
+            return cached[1]
+
+        lyric_w = PLAYER_LYRIC_W
+        rows: list[tuple[float, str, float, float, float]] = []
+        top = 0.0
+        for line_t, line_text in lines:
+            if line_text.strip():
+                h_act = measure_text(_MEASURE_CR, line_text, lyric_w, player_lyric_font(), True)[1]
+                h_dim = measure_text(_MEASURE_CR, line_text, lyric_w, player_lyric_font(), False)[1]
+            else:
+                h_act = h_dim = WAIT_ROW_H
+            rows.append((line_t, line_text, h_act, h_dim, top))
+            top += h_act + PLAYER_LYRIC_GAP
+
+        self._player_rows_cache = (lines, rows)
+        return rows
+
+    def render_player_lyrics(
+        self,
+        cr: cairo.Context,
+        px: float,
+        py: float,
+        pw: float,
+        ph: float,
+        alpha: float,
+    ) -> None:
+        if alpha <= 0.001:
+            return
+
+        lyric_y = py + 92.0
+        room = self._player_lyric_h
+        lyric_w = PLAYER_LYRIC_W
+        lyric_x = px + (pw - lyric_w) / 2.0
+        rows = self.player_lyric_rows()
+
+        if not rows:
+            render_wait(
+                cr,
+                px + pw / 2.0,
+                lyric_y + room / 2.0,
+                progress=self._wait_progress(None),
+                alpha=alpha,
+                now=time.monotonic(),
+                tint=COLOR_WHITE[:3],
+            )
+            return
+
+        at = self._media.position + LYRIC_LEAD
+        active = -1
+        for i, (line_t, _t, _ha, _hd, _top) in enumerate(rows):
+            if line_t <= at:
+                active = i
+            else:
+                break
+
+        window_h = 0.0
+        for i in range(max(0, active - 1), min(len(rows), active + 2)):
+            _lt, txt, h_act, h_dim, _tp = rows[i]
+            window_h += h_act if txt.strip() else h_dim
+        window_h += PLAYER_LYRIC_GAP * max(0, min(len(rows), active + 2) - max(0, active - 1) - 1)
+        needed = max(PLAYER_LYRIC_ROOM, window_h + 2 * PLAYER_LYRIC_PAD)
+        if needed - self._player_lyric_h > 0.5:
+            self._player_lyric_h = needed
+            self._h.tune(280, 30)
+            self.set_targets()
+            room = self._player_lyric_h
+
+        if active < 0:
+            first_t = rows[0][0]
+            target_y = room / 2.0 - (rows[0][4] + rows[0][2] / 2.0)
+            self._player_col.target = target_y
+            until_first = max(0.0, first_t - at)
+            wait_fade = 1.0 if until_first > 1.8 else max(0.0, until_first / 1.8)
+            if wait_fade > 0.01:
+                render_wait(
+                    cr,
+                    px + pw / 2.0,
+                    lyric_y + room / 2.0,
+                    progress=self._wait_progress(first_t),
+                    alpha=alpha * wait_fade,
+                    now=time.monotonic(),
+                    tint=COLOR_WHITE[:3],
+                )
+            if wait_fade >= 0.99:
+                return
+
+        if active >= 0:
+            _lt, _txt, h_act, _hd, top = rows[active]
+            target_y = room / 2.0 - (top + h_act / 2.0)
+            if abs(target_y - self._player_col.target) > 0.5:
+                self._player_col.target = target_y
+                self._player_col.tune(120, 24)
+
+            if active != self._player_last_active:
+                self._player_prev_active = self._player_last_active
+                self._player_last_active = active
+                self._player_active_spring.value = 0.0
+                self._player_active_spring.target = 1.0
+
+        col_y = self._player_col.value
+        margin = max(WAIT_ROW_H, 32.0)
+        top_limit = lyric_y - margin
+        bottom_limit = lyric_y + room + margin
+
+        effective_active = max(0, active)
+        start_t = rows[effective_active][0]
+        end_t = self._media.duration
+        if rows[effective_active][1].strip() and effective_active + 1 < len(rows):
+            end_t = rows[effective_active + 1][0]
+        else:
+            for j in range(effective_active + 1, len(rows)):
+                if rows[j][1].strip():
+                    end_t = rows[j][0]
+                    break
+        if Settings.lyric_effects:
+            prog = max(0.0, min(1.0, (at - start_t) / max(0.25, end_t - start_t)))
+        else:
+            prog = 1.0
+
+        cr.save()
+        cr.rectangle(lyric_x, lyric_y, lyric_w, room)
+        cr.clip()
+
+        fade_h = min(18.0, room * 0.22)
+        has_fade = fade_h > 1.0 and alpha > 0.01
+        if has_fade:
+            cr.push_group()
+
+        t_anim = max(0.0, min(1.0, self._player_active_spring.value))
+        intro_text_mult = (1.0 - wait_fade) if active < 0 else 1.0
+
+        try:
+            for i, (line_t, line_text, h_a, h_d, row_top) in enumerate(rows):
+                y = lyric_y + col_y + row_top
+                if y + max(h_a, h_d) < top_limit or y > bottom_limit:
+                    continue
+
+                if not line_text.strip():
+                    if i == active:
+                        time_left = max(0.0, end_t - at)
+                        gap_fade = 1.0 if time_left > 1.2 else max(0.0, time_left / 1.2)
+                        if gap_fade > 0.01:
+                            render_wait(
+                                cr,
+                                px + pw / 2.0,
+                                y + WAIT_ROW_H / 2.0,
+                                progress=self._wait_progress(line_t, end_t),
+                                alpha=alpha * gap_fade,
+                                now=time.monotonic(),
+                                tint=COLOR_WHITE[:3],
+                            )
+                    continue
+
+                if i == active:
+                    line_a = alpha * (0.40 + 0.60 * t_anim) * intro_text_mult
+                    LyricLine.render_karaoke(
+                        cr, line_text, prog, lyric_x, y, lyric_w, h_a,
+                        font_size=player_lyric_font(), is_active=True, alpha=line_a,
+                    )
+                elif i == self._player_prev_active and active >= 0:
+                    line_a = alpha * max(0.35, 1.0 - 0.60 * t_anim)
+                    LyricLine.render_karaoke(
+                        cr, line_text, 0.0, lyric_x, y, lyric_w, h_a,
+                        font_size=player_lyric_font(), is_active=False, alpha=line_a,
+                    )
+                else:
+                    near = 1.0 - min(1.0, abs(i - effective_active) / 2.5)
+                    line_a = alpha * (0.35 + 0.3 * near) * intro_text_mult
+                    LyricLine.render_karaoke(
+                        cr, line_text, 0.0, lyric_x, y, lyric_w, h_a,
+                        font_size=player_lyric_font(), is_active=False, alpha=line_a,
+                    )
+
+            if has_fade:
+                lyrics_group = cr.pop_group()
+                stop_top = fade_h / room
+                stop_bot = 1.0 - stop_top
+                grad = cairo.LinearGradient(0.0, lyric_y, 0.0, lyric_y + room)
+                grad.add_color_stop_rgba(0.0, 1.0, 1.0, 1.0, 0.0)
+                grad.add_color_stop_rgba(stop_top, 1.0, 1.0, 1.0, 1.0)
+                grad.add_color_stop_rgba(stop_bot, 1.0, 1.0, 1.0, 1.0)
+                grad.add_color_stop_rgba(1.0, 1.0, 1.0, 1.0, 0.0)
+                cr.set_source(lyrics_group)
+                cr.mask(grad)
+        finally:
+            cr.restore()
+
+    def _wait_progress(self, next_t: Optional[float], end_t: Optional[float] = None) -> float:
+        if next_t is None:
+            return 0.0
+        at = self._media.position
+        if end_t is not None and end_t > next_t:
+            return max(0.0, min(1.0, (at - next_t) / (end_t - next_t)))
+        return max(0.0, min(1.0, 1.0 - (next_t - at) / 6.0))
+
     def render_media_big(self, cr: cairo.Context, px: float, py: float, pw: float, ph: float, alpha: float) -> None:
         art_size = 64.0
         art_x = px + 20.0
@@ -2012,56 +2612,7 @@ class MainWindow(Gtk.Window):
         )
 
         if self._player_room:
-            lyric_y = py + 92.0
-            lyric_w = 340.0
-            lyric_h = self._player_lyric_h
-            lines = self._lyrics.for_duration(self._media.duration)
-            idx, curr = self._lyrics.get_current_line(self._media.position, self._media.duration, lead=0.2)
-            if lines and idx >= 0:
-                prev_text = lines[idx - 1][1] if idx > 0 else ""
-                curr_text = curr[1] if curr else ""
-                next_text = lines[idx + 1][1] if idx + 1 < len(lines) else ""
-
-                prog = 0.0
-                if curr_text:
-                    start_t = lines[idx][0]
-                    end_t = lines[idx + 1][0] if idx + 1 < len(lines) else self._media.duration
-                    prog = max(0.0, min(1.0, (self._media.position + 0.2 - start_t) / max(0.5, end_t - start_t)))
-
-                h_prev = measure_text(_MEASURE_CR, prev_text, lyric_w, PLAYER_LYRIC_FONT, False)[1] if prev_text else 0.0
-                h_curr = measure_text(_MEASURE_CR, curr_text, lyric_w, PLAYER_LYRIC_FONT, True)[1] if curr_text else 0.0
-                h_next = measure_text(_MEASURE_CR, next_text, lyric_w, PLAYER_LYRIC_FONT, False)[1] if next_text else 0.0
-
-                rows = sum(1 for h in (h_prev, h_curr, h_next) if h > 0.0)
-                stack_h = h_prev + h_curr + h_next + PLAYER_LYRIC_GAP * max(0, rows - 1)
-                needed = max(self._player_lyric_h, stack_h + 2 * PLAYER_LYRIC_PAD, PLAYER_LYRIC_ROOM)
-                if needed - self._player_lyric_h > 0.5:
-                    self._player_lyric_h = needed
-                    self._h.tune(280, 30)
-                    self.set_targets()
-
-                lyric_x = px + (pw - lyric_w) / 2.0
-                cursor = lyric_y + max(0.0, (lyric_h - stack_h) / 2.0)
-
-                if prev_text:
-                    LyricLine.render_karaoke(
-                        cr, prev_text, prog, lyric_x, cursor, lyric_w, h_prev,
-                        font_size=PLAYER_LYRIC_FONT, is_active=False, alpha=alpha,
-                    )
-                    cursor += h_prev + PLAYER_LYRIC_GAP
-
-                if curr_text:
-                    LyricLine.render_karaoke(
-                        cr, curr_text, prog, lyric_x, cursor, lyric_w, h_curr,
-                        font_size=PLAYER_LYRIC_FONT, is_active=True, alpha=alpha,
-                    )
-                    cursor += h_curr + PLAYER_LYRIC_GAP
-
-                if next_text:
-                    LyricLine.render_karaoke(
-                        cr, next_text, prog, lyric_x, cursor, lyric_w, h_next,
-                        font_size=PLAYER_LYRIC_FONT, is_active=False, alpha=alpha,
-                    )
+            self.render_player_lyrics(cr, px, py, pw, ph, alpha)
 
         dur = self._media.duration
         known_dur = dur >= 1.0
@@ -2168,6 +2719,7 @@ class MainWindow(Gtk.Window):
     def render_timer_big(self, cr: cairo.Context, px: float, py: float, pw: float, ph: float, alpha: float) -> None:
         p_cx = px + 45.0
         p_cy = py + ph / 2.0
+        cr.new_sub_path()
         cr.arc(p_cx, p_cy, 25.0, 0, 2 * math.pi)
         cr.set_source_rgba(COLOR_ORANGE[0], COLOR_ORANGE[1], COLOR_ORANGE[2], 0.25 * alpha)
         cr.fill()
@@ -2187,6 +2739,7 @@ class MainWindow(Gtk.Window):
 
         c_cx = px + 105.0
         c_cy = py + ph / 2.0
+        cr.new_sub_path()
         cr.arc(c_cx, c_cy, 25.0, 0, 2 * math.pi)
         cr.set_source_rgba(1.0, 1.0, 1.0, 0.18 * alpha)
         cr.fill()
@@ -2279,35 +2832,51 @@ class MainWindow(Gtk.Window):
 
         self._row_list_look.render_highlight(cr, w=pw - 20.0, x=px + 10.0)
 
-        render_icon(cr, Glyph.Size, px + 22.0, py + 55.5, 17.0, COLOR_DIM[:3], alpha=alpha)
-        draw_text(cr, "Размер", px + 49.0, py + 64.0, font_size=13.5, bold=False, color=COLOR_WHITE, alpha=alpha, align="left", valign="center")
-        draw_text(cr, f"{Settings.scale}%", px + pw - 24.0, py + 64.0, font_size=13.5, bold=False, color=COLOR_DIM[:3], alpha=alpha, align="right", valign="center")
-
-        render_icon(cr, Glyph.Gap, px + 22.0, py + 95.5, 17.0, COLOR_DIM[:3], alpha=alpha)
-        draw_text(cr, "Отступ от края", px + 49.0, py + 104.0, font_size=13.5, bold=False, color=COLOR_WHITE, alpha=alpha, align="left", valign="center")
-        draw_text(cr, f"{Settings.gap} px", px + pw - 24.0, py + 104.0, font_size=13.5, bold=False, color=COLOR_DIM[:3], alpha=alpha, align="right", valign="center")
-
-        render_icon(cr, Glyph.Drop, px + 22.0, py + 135.5, 17.0, COLOR_DIM[:3], alpha=alpha)
-        draw_text(cr, "Акцентный цвет", px + 49.0, py + 144.0, font_size=13.5, bold=False, color=COLOR_WHITE, alpha=alpha, align="left", valign="center")
         cur_accent_label = "Из обложки"
         for col, lbl in LOOK_COLORS:
             if col == Settings.accent:
                 cur_accent_label = lbl
                 break
-        draw_text(cr, cur_accent_label, px + pw - 24.0, py + 144.0, font_size=13.5, bold=False, color=COLOR_DIM[:3], alpha=alpha, align="right", valign="center")
 
-        swatch_y = py + 172.0
+        if Settings.material == MATERIAL_LIQUID:
+            material_label = "Жидкое"
+        elif Settings.material == MATERIAL_MATTE:
+            material_label = "Матовое"
+        else:
+            material_label = "Отключено"
+
+        rows = [
+            (Glyph.Size, "Размер", f"{Settings.scale}%"),
+            (Glyph.Gap, "Отступ от края", f"{Settings.gap} px"),
+            (Glyph.Rim, "Радиус скругления", f"{Settings.radius}%"),
+            (Glyph.Expand, "Высота острова", f"{Settings.height} px"),
+            (Glyph.Lines, "Размер текста", f"{Settings.text_scale}%"),
+            (Glyph.Look, "Стиль стекла", material_label),
+            (Glyph.Sparkle, "Сила стекла", f"{Settings.glass}%"),
+            (Glyph.Drop, "Акцентный цвет", cur_accent_label),
+        ]
+        row_y_start = py + 44.0
+        row_h = 40.0
+        for idx, (glyph, label, val_text) in enumerate(rows):
+            ry = row_y_start + idx * row_h
+            render_icon(cr, glyph, px + 22.0, ry + 11.5, 17.0, COLOR_DIM[:3], alpha=alpha)
+            draw_text(cr, label, px + 49.0, ry + 20.0, font_size=13.5, bold=False, color=COLOR_WHITE, alpha=alpha, align="left", valign="center")
+            draw_text(cr, val_text, px + pw - 24.0, ry + 20.0, font_size=13.5, bold=False, color=COLOR_DIM[:3], alpha=alpha, align="right", valign="center")
+
+        swatch_y = row_y_start + len(rows) * row_h + 18.0
         step_x = (pw - 20.0) / len(LOOK_COLORS)
         for idx, (col, _) in enumerate(LOOK_COLORS):
             sx = px + 10.0 + idx * step_x + step_x / 2.0
             is_checked = (col == Settings.accent)
 
             if is_checked:
+                cr.new_sub_path()
                 cr.arc(sx, swatch_y, 11.0, 0, 2 * math.pi)
                 cr.set_source_rgba(1.0, 1.0, 1.0, alpha)
                 cr.set_line_width(1.5)
                 cr.stroke()
 
+            cr.new_sub_path()
             cr.arc(sx, swatch_y, 7.0, 0, 2 * math.pi)
             if col is None:
                 cr.set_source_rgba(1.0, 0.4, 0.7, alpha)

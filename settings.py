@@ -25,6 +25,19 @@ CACHE_DIR = (Path(xdg_cache) if xdg_cache else (Path.home() / ".cache")) / "dyna
 MIN_SCALE = 85
 MAX_SCALE = 130
 MAX_GAP = 24
+MIN_RADIUS = 0
+MAX_RADIUS = 100
+MIN_GLASS = 20
+MAX_GLASS = 100
+MIN_HEIGHT = 0
+MAX_HEIGHT = 16
+MIN_TEXT = 80
+MAX_TEXT = 130
+DEFAULT_RADIUS = 100
+MATERIAL_MATTE = "matte"
+MATERIAL_LIQUID = "liquid"
+MATERIAL_NONE = "none"
+MATERIALS = (MATERIAL_LIQUID, MATERIAL_MATTE, MATERIAL_NONE)
 
 class _SettingsMeta(type):
 
@@ -177,6 +190,79 @@ class _SettingsMeta(type):
         cls.gap = value
 
     @property
+    def radius(cls) -> int:
+        val = cls._get_int("radius", DEFAULT_RADIUS)
+        return max(MIN_RADIUS, min(MAX_RADIUS, val))
+
+    @radius.setter
+    def radius(cls, value: int) -> None:
+        cls._set("radius", max(MIN_RADIUS, min(MAX_RADIUS, int(value))))
+
+    @property
+    def glass(cls) -> int:
+        val = cls._get_int("glass", 70)
+        return max(MIN_GLASS, min(MAX_GLASS, val))
+
+    @glass.setter
+    def glass(cls, value: int) -> None:
+        cls._set("glass", max(MIN_GLASS, min(MAX_GLASS, int(value))))
+
+    @property
+    def height(cls) -> int:
+        val = cls._get_int("height", 0)
+        return max(MIN_HEIGHT, min(MAX_HEIGHT, val))
+
+    @height.setter
+    def height(cls, value: int) -> None:
+        cls._set("height", max(MIN_HEIGHT, min(MAX_HEIGHT, int(value))))
+
+    @property
+    def text_scale(cls) -> int:
+        val = cls._get_int("text_scale", 100)
+        return max(MIN_TEXT, min(MAX_TEXT, val))
+
+    @text_scale.setter
+    def text_scale(cls, value: int) -> None:
+        cls._set("text_scale", max(MIN_TEXT, min(MAX_TEXT, int(value))))
+
+    @classmethod
+    def text_factor(cls) -> float:
+        from settings import Settings
+
+        return Settings._get_int("text_scale", 100) / 100.0
+
+    @classmethod
+    def material_is_liquid(cls) -> bool:
+        from settings import Settings
+
+        return Settings.material == MATERIAL_LIQUID
+
+    @classmethod
+    def material_is_glass(cls) -> bool:
+        from settings import Settings
+
+        return Settings.material != MATERIAL_NONE
+
+    @property
+    def material(cls) -> str:
+        raw = cls._get_str("material", MATERIAL_LIQUID)
+        if raw in MATERIALS:
+            return raw
+        if raw in ("off", "none", "disabled", "black"):
+            return MATERIAL_NONE
+        return MATERIAL_LIQUID if raw == MATERIAL_LIQUID else MATERIAL_MATTE
+
+    @material.setter
+    def material(cls, value: str) -> None:
+        if value in MATERIALS:
+            val = value
+        elif value in ("off", "none", "disabled", "black"):
+            val = MATERIAL_NONE
+        else:
+            val = MATERIAL_LIQUID if value == MATERIAL_LIQUID else MATERIAL_MATTE
+        cls._set("material", val)
+
+    @property
     def accent(cls) -> Optional[Tuple[float, float, float]]:
         raw = cls._data.get("accent")
         if raw is None:
@@ -295,6 +381,14 @@ class Settings(metaclass=_SettingsMeta):
             return int(val)
         except (ValueError, TypeError):
             return default
+
+    @classmethod
+    def _get_str(cls, key: str, default: str) -> str:
+        cls._ensure_loaded()
+        val = cls._data.get(key)
+        if val is None:
+            return default
+        return str(val)
 
     @classmethod
     def _set(cls, key: str, value: Any) -> None:

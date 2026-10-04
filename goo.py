@@ -16,6 +16,17 @@ DEFAULT_RIM_COLOR: tuple[float, float, float, float] = (
 )
 TINTED_ALPHA: float = 0x8C / 255.0
 
+
+def _chroma(r: float, g: float, b: float) -> tuple[float, float, float]:
+    max_c = max(r, g, b, 0.01)
+    cr_r = r / max_c
+    cr_g = g / max_c
+    cr_b = b / max_c
+    lum_weight = 0.2126 * cr_r + 0.7152 * cr_g + 0.0722 * cr_b
+    lum_scale = min(1.0, 0.65 / math.sqrt(max(0.2, lum_weight)))
+    return cr_r * lum_scale, cr_g * lum_scale, cr_b * lum_scale
+
+
 class Goo:
 
     def __init__(
@@ -31,6 +42,25 @@ class Goo:
         self._tint_start_color: tuple[float, float, float, float] = rim_color
         self._tint_duration: float = 0.0
         self._tint_elapsed: float = 0.0
+
+        is_default = (rim_color == DEFAULT_RIM_COLOR)
+        init_amount = 0.0 if is_default else 1.0
+        self._tint_amount: float = init_amount
+        self._tint_amount_from: float = init_amount
+        self._tint_amount_to: float = init_amount
+        self._glass: float = 0.70
+
+        self._liquid: float = 1.0
+        self._liquid_from: float = 1.0
+        self._liquid_to: float = 1.0
+        self._liquid_elapsed: float = 1.0
+        self._liquid_duration: float = 0.45
+
+        self._glass_enabled: float = 1.0
+        self._glass_enabled_from: float = 1.0
+        self._glass_enabled_to: float = 1.0
+        self._glass_enabled_elapsed: float = 1.0
+        self._glass_enabled_duration: float = 0.35
 
     def shape(
         self,
@@ -66,8 +96,10 @@ class Goo:
             g = g / 255.0 if g > 1.0 else float(g)
             b = b / 255.0 if b > 1.0 else float(b)
             to_color = (r, g, b, TINTED_ALPHA)
+            target_amount = 1.0
         else:
             to_color = DEFAULT_RIM_COLOR
+            target_amount = 0.0
 
         duration = max(0.0, float(duration_sec))
         if duration <= 0.0:
@@ -76,11 +108,74 @@ class Goo:
             self._tint_start_color = to_color
             self._tint_duration = 0.0
             self._tint_elapsed = 0.0
+            self._tint_amount = target_amount
+            self._tint_amount_from = target_amount
+            self._tint_amount_to = target_amount
         else:
             self._tint_start_color = self.rim_color
             self._target_rim_color = to_color
             self._tint_duration = duration
             self._tint_elapsed = 0.0
+            self._tint_amount_from = self._tint_amount
+            self._tint_amount_to = target_amount
+
+    def set_glass(self, factor: float) -> None:
+        self._glass = max(0.1, min(1.5, float(factor)))
+
+    def set_mode(self, mode: str, duration_sec: float = 0.35) -> None:
+        is_glass = (mode != "none")
+        is_liquid = (mode == "liquid")
+        self.material(is_liquid, duration_sec)
+
+        target = 1.0 if is_glass else 0.0
+        duration = max(0.0, float(duration_sec))
+        if duration <= 0.0:
+            self._glass_enabled = target
+            self._glass_enabled_from = target
+            self._glass_enabled_to = target
+            self._glass_enabled_elapsed = 1.0
+            self._glass_enabled_duration = 0.0
+            return
+        if abs(target - self._glass_enabled_to) < 0.001:
+            return
+        self._glass_enabled_from = self._glass_enabled
+        self._glass_enabled_to = target
+        self._glass_enabled_elapsed = 0.0
+        self._glass_enabled_duration = duration
+
+    def material(self, liquid: bool, duration_sec: float = 0.0) -> None:
+        target = 1.0 if liquid else 0.0
+        duration = max(0.0, float(duration_sec))
+        if duration <= 0.0:
+            self._liquid = target
+            self._liquid_from = target
+            self._liquid_to = target
+            self._liquid_elapsed = 1.0
+            self._liquid_duration = 0.0
+            return
+        if abs(target - self._liquid_to) < 0.001:
+            return
+        self._liquid_from = self._liquid
+        self._liquid_to = target
+        self._liquid_elapsed = 0.0
+        self._liquid_duration = duration
+
+    def _advance_material(self, dt: float) -> None:
+        if self._liquid_duration <= 0.0:
+            self._liquid = self._liquid_to
+        else:
+            self._liquid_elapsed = min(1.0, self._liquid_elapsed + dt / self._liquid_duration)
+            t = self._liquid_elapsed
+            eased = t * t * (3.0 - 2.0 * t)
+            self._liquid = self._liquid_from + (self._liquid_to - self._liquid_from) * eased
+
+        if self._glass_enabled_duration <= 0.0:
+            self._glass_enabled = self._glass_enabled_to
+        else:
+            self._glass_enabled_elapsed = min(1.0, self._glass_enabled_elapsed + dt / self._glass_enabled_duration)
+            t = self._glass_enabled_elapsed
+            eased = t * t * (3.0 - 2.0 * t)
+            self._glass_enabled = self._glass_enabled_from + (self._glass_enabled_to - self._glass_enabled_from) * eased
 
     def neck(self) -> dict[str, Any] | None:
         if self._is_empty(self.pill) or self._is_empty(self.bubble):
@@ -185,6 +280,8 @@ class Goo:
         if self._is_empty(self.pill):
             return
 
+        self._advance_material(dt)
+
         if self._tint_elapsed < self._tint_duration:
             self._tint_elapsed += dt
             t = (
@@ -202,8 +299,14 @@ class Goo:
                 self._tint_start_color[3]
                 + (self._target_rim_color[3] - self._tint_start_color[3]) * t,
             )
+            t_amt = t * t * (3.0 - 2.0 * t)
+            self._tint_amount = (
+                self._tint_amount_from
+                + (self._tint_amount_to - self._tint_amount_from) * t_amt
+            )
         elif self._tint_duration > 0.0:
             self.rim_color = self._target_rim_color
+            self._tint_amount = self._tint_amount_to
 
         px, py, pw, ph, pr = self._shrunk_rect(self.pill, self.radius)
         bubble_empty = self._is_empty(self.bubble)
@@ -308,14 +411,182 @@ class Goo:
         cr.arc(px + pr, py + pr, pr, math.pi, 3.0 * math.pi / 2.0)
         cr.close_path()
 
-    def _stroke_and_fill(self, cr: cairo.Context) -> None:
-        cr.set_source_rgba(*self.rim_color)
-        cr.set_line_width(2.0 * RIM)
-        cr.set_line_join(cairo.LINE_JOIN_ROUND)
-        cr.stroke_preserve()
+    def _bounds(self) -> tuple[float, float, float, float]:
+        x0, y0, w0, h0 = self.pill
+        x1, y1 = x0 + w0, y0 + h0
+        if not self._is_empty(self.bubble):
+            bx, by, bw, bh = self.bubble
+            x0 = min(x0, bx)
+            y0 = min(y0, by)
+            x1 = max(x1, bx + bw)
+            y1 = max(y1, by + bh)
+        return x0, y0, x1, y1
 
-        cr.set_source_rgba(0.0, 0.0, 0.0, 1.0)
+    def _paint_liquid(
+        self,
+        cr: cairo.Context,
+        strength: float,
+        tint: tuple[float, float, float],
+        tint_amount: float,
+        path: cairo.Path | None,
+        bounds: tuple[float, float, float, float],
+    ) -> None:
+        x0, y0, x1, y1 = bounds
+        w = max(1.0, x1 - x0)
+        h = max(1.0, y1 - y0)
+
+        cr_r, cr_g, cr_b = _chroma(tint[0], tint[1], tint[2])
+        amt = max(0.0, min(1.0, tint_amount))
+
+        base_alpha = 0.92 + 0.04 * (1.0 - strength * 0.4)
+        body = cairo.LinearGradient(0.0, y0, 0.0, y1)
+        body.add_color_stop_rgba(
+            0.0,
+            0.024 + 0.065 * cr_r * amt,
+            0.024 + 0.065 * cr_g * amt,
+            0.030 + 0.065 * cr_b * amt,
+            base_alpha,
+        )
+        body.add_color_stop_rgba(
+            0.48,
+            0.028 + 0.110 * cr_r * amt,
+            0.028 + 0.110 * cr_g * amt,
+            0.034 + 0.110 * cr_b * amt,
+            base_alpha,
+        )
+        body.add_color_stop_rgba(
+            1.0,
+            0.020 + 0.075 * cr_r * amt,
+            0.020 + 0.075 * cr_g * amt,
+            0.026 + 0.075 * cr_b * amt,
+            base_alpha,
+        )
+        cr.set_source(body)
+        cr.rectangle(x0, y0, w, h)
         cr.fill()
+
+        if amt > 0.001 and strength > 0.01:
+            glow_rad = max(w * 0.6, h * 1.6)
+            glow = cairo.RadialGradient(
+                x0 + w * 0.5, y0 + h * 0.65, 0.0,
+                x0 + w * 0.5, y0 + h * 0.65, glow_rad,
+            )
+            glow.add_color_stop_rgba(0.0, cr_r, cr_g, cr_b, 0.14 * amt * strength)
+            glow.add_color_stop_rgba(0.55, cr_r, cr_g, cr_b, 0.04 * amt * strength)
+            glow.add_color_stop_rgba(1.0, cr_r, cr_g, cr_b, 0.0)
+            cr.set_source(glow)
+            cr.rectangle(x0, y0, w, h)
+            cr.fill()
+
+        if amt > 0.001 and strength > 0.01:
+            caustic = cairo.LinearGradient(0.0, y1, 0.0, y1 - h * 0.45)
+            caustic.add_color_stop_rgba(0.0, cr_r, cr_g, cr_b, 0.22 * amt * strength)
+            caustic.add_color_stop_rgba(0.38, cr_r, cr_g, cr_b, 0.07 * amt * strength)
+            caustic.add_color_stop_rgba(1.0, cr_r, cr_g, cr_b, 0.0)
+            cr.set_source(caustic)
+            cr.rectangle(x0, y0, w, h)
+            cr.fill()
+
+        if strength > 0.01:
+            sheen = cairo.LinearGradient(0.0, y0, 0.0, y1)
+            sheen.add_color_stop_rgba(0.0, 1.0, 1.0, 1.0, 0.25 * strength)
+            sheen.add_color_stop_rgba(0.10, 1.0, 1.0, 1.0, 0.10 * strength)
+            sheen.add_color_stop_rgba(0.35, 1.0, 1.0, 1.0, 0.015 * strength)
+            sheen.add_color_stop_rgba(0.70, 0.0, 0.0, 0.0, 0.0)
+            sheen.add_color_stop_rgba(1.0, 0.0, 0.0, 0.0, 0.16 * strength)
+            cr.set_source(sheen)
+            cr.rectangle(x0, y0, w, h)
+            cr.fill()
+
+            glint_x = x0 + min(w * 0.25, 65.0)
+            glint_y = y0 + h * 0.12
+            glint_rad = max(w * 0.45, 80.0)
+            spec = cairo.RadialGradient(glint_x, glint_y, 0.0, glint_x, glint_y, glint_rad)
+            spec.add_color_stop_rgba(0.0, 1.0, 1.0, 1.0, 0.16 * strength)
+            spec.add_color_stop_rgba(0.45, 1.0, 1.0, 1.0, 0.03 * strength)
+            spec.add_color_stop_rgba(1.0, 1.0, 1.0, 1.0, 0.0)
+            cr.set_source(spec)
+            cr.rectangle(x0, y0, w, h)
+            cr.fill()
+
+        if path is not None and strength > 0.01:
+            cr.append_path(path)
+            inner = cairo.LinearGradient(0.0, y0, 0.0, y1)
+            inner.add_color_stop_rgba(0.0, 1.0, 1.0, 1.0, 0.32 * strength)
+            inner.add_color_stop_rgba(0.25, 1.0, 1.0, 1.0, 0.08 * strength)
+            if amt > 0.001:
+                inner.add_color_stop_rgba(0.70, cr_r, cr_g, cr_b, 0.12 * amt * strength)
+                inner.add_color_stop_rgba(1.0, cr_r, cr_g, cr_b, 0.28 * amt * strength)
+            else:
+                inner.add_color_stop_rgba(1.0, 1.0, 1.0, 1.0, 0.04 * strength)
+            cr.set_source(inner)
+            cr.set_line_width(2.0)
+            cr.stroke()
+
+    def _stroke_and_fill(self, cr: cairo.Context) -> None:
+        path = cr.copy_path()
+        glass_factor = max(0.0, min(1.0, self._glass_enabled))
+
+        if glass_factor <= 0.001:
+            cr.set_source_rgba(0.0, 0.0, 0.0, 1.0)
+            cr.fill()
+            cr.append_path(path)
+            cr.set_source_rgba(*self.rim_color)
+            cr.set_line_width(2.0 * RIM)
+            cr.set_line_join(cairo.LINE_JOIN_ROUND)
+            cr.stroke()
+            return
+
+        liquid = self._liquid
+        tint = (self.rim_color[0], self.rim_color[1], self.rim_color[2])
+        amt = max(0.0, min(1.0, self._tint_amount)) * glass_factor
+
+        ext = cr.path_extents()
+        if ext[2] > ext[0] and ext[3] > ext[1]:
+            bounds = ext
+        else:
+            bounds = self._bounds()
+
+        if glass_factor < 0.999:
+            cr.save()
+            cr.set_source_rgba(0.0, 0.0, 0.0, 1.0)
+            cr.fill_preserve()
+            cr.restore()
+
+        cr.save()
+        cr.clip()
+        strength = max(0.0, min(1.0, liquid)) * (0.6 + 0.4 * self._glass) * glass_factor
+        self._paint_liquid(cr, strength, tint, amt, path, bounds)
+        cr.restore()
+
+        cr.append_path(path)
+        x0, y0, x1, y1 = bounds
+        rim_line_width = 1.6 * RIM
+        cr.set_line_width(rim_line_width)
+        cr.set_line_join(cairo.LINE_JOIN_ROUND)
+
+        if amt > 0.001 and glass_factor > 0.1:
+            rim_grad = cairo.LinearGradient(0.0, y0, 0.0, y1)
+            rim_top_a = min(1.0, self.rim_color[3] + 0.15 * liquid * glass_factor)
+            rim_bot_a = min(1.0, self.rim_color[3] + 0.30 * liquid * glass_factor)
+            rim_grad.add_color_stop_rgba(
+                0.0,
+                0.25 + 0.75 * tint[0],
+                0.25 + 0.75 * tint[1],
+                0.25 + 0.75 * tint[2],
+                rim_top_a,
+            )
+            rim_grad.add_color_stop_rgba(
+                1.0,
+                tint[0],
+                tint[1],
+                tint[2],
+                rim_bot_a,
+            )
+            cr.set_source(rim_grad)
+        else:
+            cr.set_source_rgba(*self.rim_color)
+        cr.stroke()
 
     @staticmethod
     def _is_empty(rect: tuple[float, float, float, float] | None) -> bool:

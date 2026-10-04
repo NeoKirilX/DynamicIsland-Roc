@@ -109,6 +109,7 @@ class Aura:
             for offset, alpha in self.FALLOFF:
                 grad.add_color_stop_rgba(offset, col[0], col[1], col[2], alpha * patch_opacity)
             cr.set_source(grad)
+            cr.new_sub_path()
             cr.arc(0.0, 0.0, 1.0, 0.0, 2.0 * math.pi)
             cr.fill()
             cr.restore()
