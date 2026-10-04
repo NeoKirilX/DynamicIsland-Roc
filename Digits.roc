@@ -1,4 +1,44 @@
-module [DigitsState, DigitCell, init, setText, tick]
+module [DigitsState, DigitCell, init, setText, tick, shrinks]
+
+extractDigits : Str -> List U8
+extractDigits = |str|
+    Str.to_utf8 str
+    |> List.keep_if |b| b >= 48 and b <= 57
+
+dropLeadingZeros : List U8 -> List U8
+dropLeadingZeros = |bytes|
+    when List.find_first_index bytes |b| b != 48 is
+        Ok idx -> List.drop_first bytes idx
+        Err _ -> []
+
+compareDigitLists : List U8, List U8 -> [Shrinks, Grows, Same]
+compareDigitLists = |a, b|
+    lenA = List.len a
+    lenB = List.len b
+    if lenA > lenB then
+        Shrinks
+    else if lenA < lenB then
+        Grows
+    else
+        mismatch =
+            List.map2 a b |x, y| (x, y)
+            |> List.find_first |(x, y)| x != y
+        when mismatch is
+            Ok (x, y) ->
+                if x > y then Shrinks else Grows
+            Err _ ->
+                Same
+
+shrinks : Str, Str -> Result [Shrinks, Grows, Same] [NoDigits]
+shrinks = |was, next|
+    digitsA = extractDigits was
+    digitsB = extractDigits next
+    if List.is_empty digitsA or List.is_empty digitsB then
+        Err NoDigits
+    else
+        cleanA = dropLeadingZeros digitsA
+        cleanB = dropLeadingZeros digitsB
+        Ok (compareDigitLists cleanA cleanB)
 
 DigitCell : {
     char : Str,
@@ -255,3 +295,12 @@ expect
     d0 = init "24:59" Bool.true
     d1 = setText d0 "9"
     List.len d1.cells == 1 and d1.text == "9"
+
+expect
+    shrinks "1:05" "0:59" == Ok Shrinks
+
+expect
+    shrinks "45" "50" == Ok Grows
+
+expect
+    shrinks "10" "10" == Ok Same

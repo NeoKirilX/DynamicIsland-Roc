@@ -28,10 +28,11 @@ class Digits:
     def __init__(
         self,
         text: str = "",
-        down: bool = True,
+        down: bool | None = None,
         font_family: str | None = "sans-serif",
     ) -> None:
-        self.down: bool = bool(down)
+        self.down_setting: bool | None = down
+        self.down: bool = True if down is None else bool(down)
         self.font_family: str | None = font_family
 
         self._text: str = ""
@@ -40,6 +41,18 @@ class Digits:
 
         if text:
             self.set_text(text)
+
+    @staticmethod
+    def shrinks(was: str, next_s: str) -> bool | None:
+        if not any(c.isdigit() for c in was) or not any(c.isdigit() for c in next_s):
+            return None
+        a = "".join(c for c in was if c.isdigit()).lstrip("0")
+        b = "".join(c for c in next_s if c.isdigit()).lstrip("0")
+        if len(a) != len(b):
+            return len(a) > len(b)
+        if a == b:
+            return None
+        return a > b
 
     @property
     def text(self) -> str:
@@ -53,6 +66,14 @@ class Digits:
         text = str(text) if text is not None else ""
         if text == self._text:
             return
+
+        was = self._text
+        if self.down_setting is not None:
+            self.down = self.down_setting
+        else:
+            s = self.shrinks(was, text)
+            if s is not None:
+                self.down = s
 
         self._text = text
 

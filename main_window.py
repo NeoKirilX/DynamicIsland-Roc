@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import ctypes
 import datetime
+import io
 import math
 import os
 import re
 import sys
 import time
+import urllib.parse
 from enum import Enum, auto
 from pathlib import Path
 from typing import Any, Optional, Tuple
@@ -24,7 +26,7 @@ import gi
 gi.require_version("Gtk", "4.0")
 gi.require_version("Gdk", "4.0")
 gi.require_version("Gtk4LayerShell", "1.0")
-from gi.repository import Gdk, GLib, Gtk, Gtk4LayerShell
+from gi.repository import Gdk, Gio, GLib, Gtk, Gtk4LayerShell
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 if str(SCRIPT_DIR) not in sys.path:
@@ -41,14 +43,16 @@ from headset import get_headset_charge
 from icon import Glyph, render_battery, render_icon
 from lyric import LyricLine, measure_text, render_wait, select_font
 from lyrics_service import LyricsService
-from media_service import MediaService
-from native_wayland import is_ctrl_down, is_fullscreen
+from media_service import MediaService, clean_track_title, format_display_title
+from native_wayland import is_ctrl_down, is_fullscreen, query_do_not_disturb
 from network_service import Link, NetworkService, State
 from ring import Ring
 from row_list import RowList
 from settings import MATERIAL_LIQUID, MATERIAL_MATTE, MATERIAL_NONE, Settings
+from shelf import Shelf, ShelfItem
 from spectrum_service import SpectrumService
 from spring import Spring
+from shimmer import Shimmer
 from timer_service import Countdown
 from toggle import Toggle
 
@@ -63,6 +67,7 @@ class View(Enum):
     TIMER = auto()
     VOLUME = auto()
     CHARGE = auto()
+    FOCUS = auto()
     TOAST = auto()
     NOTICE = auto()
     MEDIA_BIG = auto()
@@ -72,6 +77,7 @@ class View(Enum):
     MENU = auto()
     SETTINGS = auto()
     LOOK = auto()
+    SHELF = auto()
 
 class Panel(Enum):
     NONE = auto()
@@ -81,6 +87,7 @@ class Panel(Enum):
     MENU = auto()
     SETTINGS = auto()
     LOOK = auto()
+    SHELF = auto()
 
 class Dims:
     __slots__ = ("w", "h", "r")
@@ -98,6 +105,9 @@ class Dims:
 
 LOOK_WIDTH = 320.0
 LOOK_HEIGHT = 420.0
+COLOR_INDIGO: Tuple[float, float, float] = (0.49, 0.478, 1.0)
+CARRY_TIMER: float = 78.0
+CARRY_SHELF: float = 54.0
 
 SIZES: dict[View, Dims] = {
     View.IDLE: Dims(118, 34, 17),
@@ -105,15 +115,17 @@ SIZES: dict[View, Dims] = {
     View.TIMER: Dims(132, 34, 17),
     View.VOLUME: Dims(250, 34, 17),
     View.CHARGE: Dims(230, 34, 17),
+    View.FOCUS: Dims(236, 34, 17),
     View.TOAST: Dims(340, 68, 30),
     View.NOTICE: Dims(320, 64, 29),
     View.MEDIA_BIG: Dims(380, 176, 40),
     View.IDLE_BIG: Dims(320, 124, 38),
     View.TIMER_BIG: Dims(330, 92, 40),
     View.TIMER_SET: Dims(300, 190, 38),
-    View.MENU: Dims(300, 208, 34),
-    View.SETTINGS: Dims(320, 374, 34),
+    View.MENU: Dims(300, 248, 34),
+    View.SETTINGS: Dims(320, 414, 34),
     View.LOOK: Dims(LOOK_WIDTH, LOOK_HEIGHT, 34),
+    View.SHELF: Dims(380, 136, 34),
 }
 
 SCALES: list[int] = [85, 100, 115, 130]
@@ -138,7 +150,7 @@ SEEK_THIN = 6.0
 SEEK_HOVER = 9.0
 SEEK_DRAG = 12.0
 MEDIA_WIDTH = 210.0
-MEDIA_MAX_WIDTH = 440.0
+MEDIA_MAX_WIDTH = 480.0
 MEDIA_NAME_WIDTH = 300.0
 LYRIC_INSET = 77.0
 LYRIC_EDGE = 8.0
@@ -383,6 +395,7 @@ class MainWindow(Gtk.Window):
             "hide_fullscreen": Toggle(Settings.hide_fullscreen),
             "click_lock": Toggle(Settings.click_lock),
             "autostart": Toggle(Settings.autostart),
+            "capitalize_title": Toggle(Settings.capitalize_title),
         }
 
         self._w = Spring(34.0)
@@ -465,6 +478,7 @@ class MainWindow(Gtk.Window):
         self._media_width = MEDIA_WIDTH
         self._player_room = False
         self._player_lyric_h = PLAYER_LYRIC_ROOM
+        self._shimmer = Shimmer()
         self._player_col = Spring(0.0, 170.0, 26.0)
         self._player_last_active: int = -1
         self._player_prev_active: int = -1
@@ -487,6 +501,33 @@ class MainWindow(Gtk.Window):
         self._last_track_key = ""
         self._last_lyric_text = ""
         self._last_lyric_key: Optional[tuple[Optional[float], str]] = None
+
+        self._shelf = Shelf()
+        self._shelf.add_change_listener(self.on_shelf_changed)
+        self._carry_shelf = Spring(0.0)
+        self._carry_timer = Spring(0.0)
+        self._shelf_wide = Spring(CARRY_SHELF)
+        self._shelf_scroll = Spring(0.0)
+        self._carry_shelf.tune(260, 24)
+        self._carry_timer.tune(260, 24)
+        self._shelf_wide.tune(260, 24)
+        self._shelf_scroll.tune(260, 30)
+        self._digits_shelf = Digits(str(len(self._shelf.items)) if self._shelf.items else "0")
+        self._digits_shelf_menu = Digits(str(len(self._shelf.items)) if self._shelf.items else "0")
+        self._shelf_shown: int = len(self._shelf.items)
+
+        self._quiet: Optional[bool] = None
+        self._focus_swing = Spring(0.0)
+        self._focus_scale = Spring(1.0)
+        self._focus_swing.tune(260, 24)
+        self._focus_scale.tune(260, 24)
+        self._last_quiet_poll: float = 0.0
+
+        self._shelf_hover_tile: Optional[int] = None
+        self._shelf_hover_cross: Optional[int] = None
+        self._shelf_btn_add_rect: Tuple[float, float, float, float] = (0.0, 0.0, 0.0, 0.0)
+        self._shelf_btn_clear_rect: Tuple[float, float, float, float] = (0.0, 0.0, 0.0, 0.0)
+        self._dragging_shelf: bool = False
 
         self._btn_prev_rect: tuple[float, float, float, float] = (0, 0, 0, 0)
         self._btn_play_rect: tuple[float, float, float, float] = (0, 0, 0, 0)
@@ -546,6 +587,214 @@ class MainWindow(Gtk.Window):
         scroll.connect("scroll", self.on_mouse_scroll)
         self.area.add_controller(scroll)
 
+        try:
+            drag_source = Gtk.DragSource.new()
+            drag_source.set_actions(Gdk.DragAction.COPY | Gdk.DragAction.LINK)
+            drag_source.connect("prepare", self.on_drag_prepare)
+            drag_source.connect("drag-begin", self.on_drag_begin)
+            drag_source.connect("drag-end", self.on_drag_end)
+            drag_source.connect("drag-cancel", self.on_drag_cancel)
+            self.area.add_controller(drag_source)
+        except Exception:
+            pass
+
+        try:
+            formats = Gdk.ContentFormats.new(['text/uri-list', 'text/plain', 'text/plain;charset=utf-8']).union(
+                Gdk.ContentFormats.new_for_gtype(Gdk.FileList)
+            )
+            drop_target = Gtk.DropTargetAsync.new(formats, Gdk.DragAction.COPY | Gdk.DragAction.MOVE | Gdk.DragAction.LINK)
+            drop_target.connect("accept", self.on_drop_accept)
+            drop_target.connect("drag-enter", self.on_drop_enter)
+            drop_target.connect("drag-motion", self.on_drop_motion)
+            drop_target.connect("drop", self.on_drop)
+            self.area.add_controller(drop_target)
+        except Exception:
+            pass
+
+    def on_drop_accept(self, target: Gtk.DropTargetAsync, drop: Gdk.Drop) -> bool:
+        return True
+
+    def on_drop_enter(self, target: Gtk.DropTargetAsync, drop: Gdk.Drop, x: float, y: float) -> Gdk.DragAction:
+        self.open_panel(Panel.SHELF)
+        self.update_view()
+        self.set_targets()
+        return Gdk.DragAction.COPY
+
+    def on_drop_motion(self, target: Gtk.DropTargetAsync, drop: Gdk.Drop, x: float, y: float) -> Gdk.DragAction:
+        return Gdk.DragAction.COPY
+
+    def on_drop(self, target: Gtk.DropTargetAsync, drop: Gdk.Drop, x: float, y: float) -> bool:
+        formats = drop.get_formats()
+        if formats.contain_gtype(Gdk.FileList):
+            drop.read_value_async(Gdk.FileList, GLib.PRIORITY_DEFAULT, None, self._on_drop_file_list_ready)
+            return True
+        elif formats.contain_mime_type("text/uri-list") or formats.contain_mime_type("text/plain"):
+            drop.read_async(["text/uri-list", "text/plain"], GLib.PRIORITY_DEFAULT, None, self._on_drop_uri_ready)
+            return True
+        return False
+
+    def _on_drop_uri_ready(self, drop: Gdk.Drop, result: Gio.AsyncResult) -> None:
+        try:
+            stream, _ = drop.read_finish(result)
+        except Exception:
+            try:
+                drop.finish(Gdk.DragAction.COPY)
+            except Exception:
+                pass
+            return
+
+        if stream is None:
+            try:
+                drop.finish(Gdk.DragAction.COPY)
+            except Exception:
+                pass
+            return
+
+        def read_worker() -> None:
+            paths: list[str] = []
+            try:
+                chunks: list[bytes] = []
+                while True:
+                    b = stream.read_bytes(65536, None)
+                    data = b.get_data() if b else b""
+                    if not data:
+                        break
+                    chunks.append(data)
+                try:
+                    stream.close(None)
+                except Exception:
+                    pass
+                raw_text = b"".join(chunks).decode("utf-8", errors="replace")
+                for line in raw_text.splitlines():
+                    line = line.strip()
+                    if not line or line.startswith("#"):
+                        continue
+                    if line.startswith("file://"):
+                        path = urllib.parse.unquote(urllib.parse.urlsplit(line).path)
+                    else:
+                        path = urllib.parse.unquote(line)
+                    if os.path.exists(path):
+                        paths.append(path)
+            except Exception:
+                pass
+            finally:
+                def on_done() -> None:
+                    try:
+                        drop.finish(Gdk.DragAction.COPY)
+                    except Exception:
+                        pass
+                    if paths:
+                        self._shelf.add(paths)
+                        self.open_panel(Panel.SHELF)
+                        self.update_view()
+                        self.set_targets()
+                GLib.idle_add(on_done)
+
+        threading.Thread(target=read_worker, daemon=True).start()
+
+    def _on_drop_file_list_ready(self, drop: Gdk.Drop, result: Gio.AsyncResult) -> None:
+        paths = []
+        try:
+            val = drop.read_value_finish(result)
+            if hasattr(val, "get_value"):
+                val = val.get_value()
+            files = val.get_files() if hasattr(val, "get_files") else (val if hasattr(val, "__iter__") else [])
+            for f in files:
+                if hasattr(f, "get_path"):
+                    p = f.get_path()
+                    if p and os.path.exists(p):
+                        paths.append(p)
+            if paths:
+                self._shelf.add(paths)
+                self.open_panel(Panel.SHELF)
+                self.update_view()
+                self.set_targets()
+        except Exception:
+            pass
+        finally:
+            try:
+                drop.finish(Gdk.DragAction.COPY)
+            except Exception:
+                pass
+
+    def _get_shelf_item_at(self, lx: float, ly: float) -> Optional[Any]:
+        if self._current_view != View.SHELF or not self._shelf.items:
+            return None
+        px, py, pw, ph, _, _ = self._get_pill_and_bubble_rects()
+        strip_x = px + 18.0
+        strip_y = py + 42.0
+        strip_w = pw - 36.0
+        strip_h = 80.0
+        if not (strip_x <= lx <= strip_x + strip_w and strip_y <= ly <= strip_y + strip_h):
+            return None
+        offset_x = self._shelf_scroll.value
+        for idx, item in enumerate(self._shelf.items):
+            tx = strip_x - offset_x + idx * 68.0
+            ty = strip_y + 4.0
+            cross_x = tx + 44.0
+            cross_y = ty - 4.0
+            if cross_x <= lx <= cross_x + 18.0 and cross_y <= ly <= cross_y + 18.0:
+                return None
+            if tx <= lx <= tx + 56.0 and ty <= ly <= ty + 70.0:
+                return item
+        return None
+
+    def on_drag_prepare(self, source: Gtk.DragSource, x: float, y: float) -> Optional[Gdk.ContentProvider]:
+        lx, ly = self._screen_to_local(x, y)
+        item = self._get_shelf_item_at(lx, ly)
+        if item is None or not os.path.exists(item.path):
+            return None
+
+        gfile = Gio.File.new_for_path(item.path)
+        fl = Gdk.FileList.new_from_list([gfile])
+        cp_fl = Gdk.ContentProvider.new_for_value(fl)
+        cp_f = Gdk.ContentProvider.new_for_value(gfile)
+
+        uri_str = f"{gfile.get_uri()}\r\n"
+        uri_bytes = GLib.Bytes.new(uri_str.encode("utf-8"))
+        cp_uri = Gdk.ContentProvider.new_for_bytes("text/uri-list", uri_bytes)
+
+        txt_bytes = GLib.Bytes.new(f"{item.path}\n".encode("utf-8"))
+        cp_txt = Gdk.ContentProvider.new_for_bytes("text/plain", txt_bytes)
+
+        try:
+            tex = None
+            if item.surface is not None:
+                buf = io.BytesIO()
+                item.surface.write_to_png(buf)
+                tex = Gdk.Texture.new_from_bytes(GLib.Bytes.new(buf.getvalue()))
+            elif item.path:
+                try:
+                    tex = Gdk.Texture.new_from_filename(item.path)
+                except Exception:
+                    pass
+            if tex is not None:
+                tw = tex.get_width()
+                th = tex.get_height()
+                source.set_icon(tex, int(tw / 2), int(th / 2))
+        except Exception:
+            pass
+
+        return Gdk.ContentProvider.new_union([cp_fl, cp_f, cp_uri, cp_txt])
+
+    def on_drag_begin(self, source: Gtk.DragSource, drag: Gdk.Drag) -> None:
+        self._dragging_shelf = True
+
+    def on_drag_end(self, source: Gtk.DragSource, drag: Gdk.Drag, delete_data: bool) -> None:
+        self._dragging_shelf = False
+
+    def on_drag_cancel(self, source: Gtk.DragSource, drag: Gdk.Drag, reason: Gdk.DragCancelReason) -> bool:
+        self._dragging_shelf = False
+        return False
+
+    def on_shelf_changed(self) -> None:
+        count = len(self._shelf.items)
+        self._digits_shelf.set_text(str(count) if count > 0 else "0")
+        self._digits_shelf_menu.set_text(str(count) if count > 0 else "")
+        self._shelf_shown = count
+        self.set_targets()
+        self.area.queue_draw()
+
     def _get_pill_and_bubble_rects(self) -> Tuple[
         float, float, float, float, float,
         Optional[Tuple[float, float, float, float, float]]
@@ -570,10 +819,14 @@ class MainWindow(Gtk.Window):
         bubble_info = None
         if apart:
             pill_right = w / 2.0
-            past = ((BUBBLE_GAP + BUBBLE_WIDTH) * split - BUBBLE_WIDTH) / scale
+            timer_w = self._carry_timer.value * CARRY_TIMER
+            shelf_w = self._carry_shelf.value * self._shelf_wide.value
+            both = (self._carry_timer.value > 0.05 and self._carry_shelf.value > 0.05)
+            base_bw = max(CARRY_SHELF, timer_w + shelf_w + (6.0 if both else 0.0))
+            past = ((BUBBLE_GAP + base_bw) * split - base_bw) / scale
             bx = pill_right + past
             by = 0.0
-            bw = BUBBLE_WIDTH * bubble_scale / scale
+            bw = base_bw * bubble_scale / scale
             bh = BUBBLE_HEIGHT * bubble_scale / scale
             br = bh / 2.0
             bubble_info = (bx, by, bw, bh, br)
@@ -634,7 +887,7 @@ class MainWindow(Gtk.Window):
             row_y_start = py + 36.0
             row_h = 40.0
             hovered = None
-            for idx in range(4):
+            for idx in range(5):
                 ry = row_y_start + idx * row_h
                 if px + 10 <= lx <= px + pw - 10 and ry <= ly < ry + row_h:
                     hovered = idx
@@ -648,7 +901,7 @@ class MainWindow(Gtk.Window):
             row_y_start = py + 44.0
             row_h = 40.0
             hovered = None
-            for idx in range(8):
+            for idx in range(9):
                 ry = row_y_start + idx * row_h
                 if px + 10 <= lx <= px + pw - 10 and ry <= ly < ry + row_h:
                     hovered = idx
@@ -670,6 +923,23 @@ class MainWindow(Gtk.Window):
                     break
             if hovered is None:
                 self._row_list_look.clear_hover()
+            self.area.queue_draw()
+
+        elif self._current_view == View.SHELF:
+            strip_x = px + 18.0
+            strip_y = py + 42.0
+            strip_w = pw - 36.0
+            offset_x = self._shelf_scroll.value
+            for idx, item in enumerate(self._shelf.items):
+                tx = strip_x - offset_x + idx * 68.0
+                ty = strip_y + 4.0
+                in_tile = tx <= lx <= tx + 56.0 and ty <= ly <= ty + 56.0
+                cross_x = tx + 44.0
+                cross_y = ty - 4.0
+                in_cross = cross_x <= lx <= cross_x + 18.0 and cross_y <= ly <= cross_y + 18.0
+                item.is_hovered = in_tile or in_cross
+                item.swell.target = 1.06 if (in_tile or in_cross) else 1.0
+                item.cross.target = 1.0 if (in_tile or in_cross) else 0.0
             self.area.queue_draw()
 
     def on_mouse_pressed(self, gesture: Gtk.GestureClick, n_press: int, x: float, y: float) -> None:
@@ -744,7 +1014,18 @@ class MainWindow(Gtk.Window):
 
         if self._bubble_pressed:
             self._bubble_pressed = False
-            self.open_panel(Panel.TIMER)
+            timer_on = self._carry_timer.value > 0.05
+            shelf_on = self._carry_shelf.value > 0.05
+            if timer_on and shelf_on:
+                bx = bubble[0] if bubble else 0.0
+                if lx < bx + CARRY_TIMER:
+                    self.open_panel(Panel.TIMER)
+                else:
+                    self.open_panel(Panel.SHELF)
+            elif timer_on:
+                self.open_panel(Panel.TIMER)
+            else:
+                self.open_panel(Panel.SHELF)
             self.update_view()
             self.set_targets()
             self._collapse_expiry = time.monotonic() + BUBBLE_LINGER_SEC
@@ -834,16 +1115,18 @@ class MainWindow(Gtk.Window):
         if self._current_view == View.MENU:
             row_y_start = py + 36.0
             row_h = 40.0
-            for idx in range(4):
+            for idx in range(5):
                 ry = row_y_start + idx * row_h
                 if px + 10 <= lx <= px + pw - 10 and ry <= ly < ry + row_h:
                     if idx == 0:
                         self.open_panel(Panel.TIMER if self._timer.active else Panel.TIMER_SET)
                     elif idx == 1:
-                        self.open_panel(Panel.SETTINGS)
+                        self.open_panel(Panel.SHELF)
                     elif idx == 2:
-                        self.open_panel(Panel.LOOK)
+                        self.open_panel(Panel.SETTINGS)
                     elif idx == 3:
+                        self.open_panel(Panel.LOOK)
+                    elif idx == 4:
                         self.exit_island()
                     self.update_view()
                     self.set_targets()
@@ -867,8 +1150,10 @@ class MainWindow(Gtk.Window):
                 "hide_fullscreen",
                 "click_lock",
                 "autostart",
+                "capitalize_title",
             ]
-            for idx, key in enumerate(setting_keys):
+            for idx in range(9):
+                key = setting_keys[idx]
                 ry = row_y_start + idx * row_h
                 if px + 10 <= lx <= px + pw - 10 and ry <= ly < ry + row_h:
                     cur = getattr(Settings, key)
@@ -880,6 +1165,8 @@ class MainWindow(Gtk.Window):
                         self.track_lyrics()
                     elif key == "hide_fullscreen":
                         self.check_fullscreen()
+                    elif key == "capitalize_title":
+                        self.update_lyric()
                     self.area.queue_draw()
                     return
 
@@ -964,6 +1251,51 @@ class MainWindow(Gtk.Window):
                     self.set_accent(LOOK_COLORS[idx][0])
                     return
 
+        if self._current_view == View.SHELF:
+            if px + 10 <= lx <= px + 100 and py + 12 <= ly <= py + 40:
+                self.open_panel(Panel.MENU)
+                self.update_view()
+                self.set_targets()
+                return
+
+            bx, by, bw, bh = self._shelf_btn_add_rect
+            if bx <= lx <= bx + bw and by <= ly <= by + bh:
+                self.pick_files_for_shelf()
+                return
+
+            cx, cy, cw, ch = self._shelf_btn_clear_rect
+            if cx <= lx <= cx + cw and cy <= ly <= cy + ch:
+                self._shelf.clear()
+                return
+
+            strip_x = px + 18.0
+            strip_y = py + 42.0
+            strip_w = pw - 36.0
+            strip_h = 80.0
+
+            if not self._shelf.items:
+                if strip_x <= lx <= strip_x + strip_w and strip_y <= ly <= strip_y + strip_h:
+                    self.pick_files_for_shelf()
+                return
+
+            offset_x = self._shelf_scroll.value
+            for idx, item in enumerate(self._shelf.items):
+                tx = strip_x - offset_x + idx * 68.0
+                ty = strip_y + 4.0
+                cross_x = tx + 44.0
+                cross_y = ty - 4.0
+                if cross_x <= lx <= cross_x + 18.0 and cross_y <= ly <= cross_y + 18.0:
+                    self._shelf.remove(item)
+                    return
+                if tx <= lx <= tx + 56.0 and ty <= ly <= ty + 56.0:
+                    if self._dragging_shelf:
+                        return
+                    self._shelf.open_item(item)
+                    self.open_panel(Panel.NONE)
+                    self.update_view()
+                    self.set_targets()
+                    return
+
         if self._panel != Panel.NONE:
             self.open_panel(Panel.NONE)
         else:
@@ -987,6 +1319,12 @@ class MainWindow(Gtk.Window):
 
         if self._current_view == View.TIMER_SET:
             self.set_minutes(self._minutes + step)
+            return True
+
+        if self._current_view == View.SHELF:
+            max_scroll = max(0.0, len(self._shelf.items) * 68.0 - 4.0 - (SHELF_WIDE - 36.0))
+            new_target = max(0.0, min(max_scroll, self._shelf_scroll.target - step * 68.0))
+            self._shelf_scroll.target = new_target
             return True
 
         lx, ly = self._screen_to_local(self._mouse_x, self._mouse_y)
@@ -1081,6 +1419,8 @@ class MainWindow(Gtk.Window):
                 target = View.SETTINGS
             elif self._panel == Panel.LOOK:
                 target = View.LOOK
+            elif self._panel == Panel.SHELF:
+                target = View.SHELF
             elif self._panel == Panel.TIMER_SET:
                 target = View.TIMER_SET
             elif self._panel == Panel.TIMER and self._timer.active:
@@ -1113,9 +1453,11 @@ class MainWindow(Gtk.Window):
             self.update_player_lyric(snap=True)
             self._seek_x.value = 0.0
             self._seek_x.velocity = 0.0
-        elif target == View.MEDIA:
-            snap = self._previous_view not in (View.TOAST, View.IDLE) and self._last_lyric_key is not None
-            self.update_lyric(snap=snap)
+        else:
+            self._shimmer.run(False)
+            if target == View.MEDIA:
+                snap = self._previous_view not in (View.TOAST, View.IDLE) and self._last_lyric_key is not None
+                self.update_lyric(snap=snap)
 
         to_dims = self.size_of(target)
         growing = (to_dims.w * to_dims.h) >= (from_dims.w * from_dims.h)
@@ -1143,7 +1485,14 @@ class MainWindow(Gtk.Window):
         self._h.target = d.h + Settings.height
         self._r.target = d.r * Settings.radius / 100.0
 
-        self._split.target = 1.0 if (self._timer.active and compact and self._current_view != View.TIMER) else 0.0
+        timer = self._timer.active and self._current_view != View.TIMER
+        shelf = len(self._shelf.items) > 0
+        split = compact and (timer or shelf)
+        self._split.target = 1.0 if split else 0.0
+        self._carry_timer.target = 1.0 if timer else 0.0
+        self._carry_shelf.target = 1.0 if shelf else 0.0
+        count = len(self._shelf.items)
+        self._shelf_wide.target = 64.0 if count >= 100 else (54.0 if count >= 10 else 50.0)
 
         if (self._hidden or self._away) and not self._ringing:
             self._offset.target = -(d.h + 30.0 + Settings.gap * 100.0 / Settings.scale)
@@ -1239,6 +1588,16 @@ class MainWindow(Gtk.Window):
         moving |= self._split.advance(dt)
         moving |= self._bubble_scale.advance(dt)
         moving |= self._push.advance(dt)
+        moving |= self._carry_shelf.advance(dt)
+        moving |= self._carry_timer.advance(dt)
+        moving |= self._shelf_scroll.advance(dt)
+        moving |= self._shelf_wide.advance(dt)
+        moving |= self._focus_swing.advance(dt)
+        moving |= self._focus_scale.advance(dt)
+        moving |= self._shelf.tick(dt)
+        moving |= self._digits_shelf.tick(dt)
+        moving |= self._digits_shelf_menu.tick(dt)
+        self._poll_quiet(now)
 
         if self._current_view == View.MEDIA_BIG or self._scrubbing:
             dur = self._media.duration
@@ -1257,6 +1616,7 @@ class MainWindow(Gtk.Window):
         if self._current_view == View.MEDIA_BIG:
             moving |= self._player_col.advance(dt)
             moving |= self._player_active_spring.advance(dt)
+            moving |= self._shimmer.tick(dt)
 
         if self._current_view == View.MEDIA and self._lyric_overflow > 0.0 and Settings.lyrics:
             moving |= self._advance_lyric_scroll(dt)
@@ -1348,6 +1708,58 @@ class MainWindow(Gtk.Window):
             self.update_view()
 
         return True
+
+    def _poll_quiet(self, now: float) -> None:
+        if now - self._last_quiet_poll < 1.0:
+            return
+        self._last_quiet_poll = now
+        q = query_do_not_disturb()
+        if q is None or q == self._quiet:
+            return
+        first = self._quiet is None
+        self._quiet = q
+        if first:
+            return
+        if q:
+            self._focus_swing.value = -80.0
+            self._focus_swing.target = 0.0
+            self._focus_scale.value = 0.4
+            self._focus_scale.target = 1.0
+        else:
+            self._focus_swing.value = 0.0
+            self._focus_swing.target = 24.0
+            self._focus_scale.value = 1.0
+            self._focus_scale.target = 0.84
+        self.show_transient(View.FOCUS, 2.2)
+
+    def pick_files_for_shelf(self) -> None:
+        def worker() -> None:
+            try:
+                import shutil
+                if shutil.which("zenity"):
+                    res = subprocess.run(
+                        ["zenity", "--file-selection", "--multiple", "--separator=|"],
+                        capture_output=True,
+                        text=True,
+                        timeout=60,
+                    )
+                    if res.returncode == 0 and res.stdout.strip():
+                        paths = res.stdout.strip().split("|")
+                        GLib.idle_add(self._shelf.add, paths)
+                elif shutil.which("kdialog"):
+                    res = subprocess.run(
+                        ["kdialog", "--getopenfilename", "--multiple", "."],
+                        capture_output=True,
+                        text=True,
+                        timeout=60,
+                    )
+                    if res.returncode == 0 and res.stdout.strip():
+                        paths = res.stdout.strip().split(" ")
+                        GLib.idle_add(self._shelf.add, paths)
+            except Exception:
+                pass
+
+        threading.Thread(target=worker, daemon=True).start()
 
     def update_input_region(self) -> None:
         surf = self.get_surface()
@@ -1592,15 +2004,22 @@ class MainWindow(Gtk.Window):
             self._lyric_enter.value = 1.0
             self._lyric_enter.target = 1.0
 
-    BRACKETS_PUNCT = '()[]{}\"\'«».,;!?-—– '
-
-    @classmethod
-    def _normalize_phrase(cls, p: str) -> str:
-        return re.sub(r'[\s.,!?;:\"\'—–\-\(\)\[\]\{\}«»]+', '', p.lower())
+    PUNCT_ONLY = '.,;!?-—–:\"\'«» '
 
     @classmethod
     def _clean_phrase(cls, p: str) -> str:
-        return p.strip().strip(cls.BRACKETS_PUNCT).strip()
+        s = p.strip().strip(cls.PUNCT_ONLY).strip()
+        if (s.startswith("(") and s.endswith(")")) or (s.startswith("[") and s.endswith("]")) or (s.startswith("{") and s.endswith("}")):
+            inner = s[1:-1].strip().strip(cls.PUNCT_ONLY).strip()
+            if inner:
+                s = inner
+        return s
+
+    @classmethod
+    def _normalize_phrase(cls, p: str) -> str:
+        without_brackets = re.sub(r'\([^)]*\)|\[[^\]]*\]|\{[^}]*\}', '', p)
+        target = without_brackets if without_brackets.strip() else p
+        return re.sub(r'[\s.,!?;:\"\'—–\-\(\)\[\]\{\}«»]+', '', target.lower())
 
     @classmethod
     def _split_phrase_line(cls, text: str) -> list[str]:
@@ -1647,15 +2066,27 @@ class MainWindow(Gtk.Window):
 
             norm = cls._normalize_phrase(txt)
             j = i
-            while j < len(expanded) and cls._normalize_phrase(expanded[j][1]) == norm:
-                j += 1
+            while j < len(expanded):
+                cur_norm = cls._normalize_phrase(expanded[j][1])
+                if cur_norm == norm:
+                    j += 1
+                elif (
+                    j + 1 < len(expanded)
+                    and cls._normalize_phrase(expanded[j + 1][1]) == norm
+                    and (len(cls._clean_phrase(expanded[j][1])) <= 4 or (expanded[j][1].strip().startswith("(") and expanded[j][1].strip().endswith(")")))
+                ):
+                    j += 1
+                else:
+                    break
 
             count = j - i
-            if count >= 4:
+            if count >= 3:
+                combo_idx = 1
                 for k in range(i, j):
                     sub_t, sub_txt = expanded[k][0], expanded[k][1]
                     clean_sub = cls._clean_phrase(sub_txt)
-                    result.append((sub_t, f"{clean_sub} х{k - i + 1}"))
+                    result.append((sub_t, f"{clean_sub} х{combo_idx}"))
+                    combo_idx += 1
                 i = j
             else:
                 k = i
@@ -1723,6 +2154,23 @@ class MainWindow(Gtk.Window):
 
         return None
 
+    def lyrics_have_words(self) -> bool:
+        mode = Settings.lyric_anim
+        if mode == "vertical":
+            return False
+        if mode == "words":
+            return True
+        return self._lyrics.is_synced
+
+    def compact_track_title(self) -> str:
+        if not self._media.has_track:
+            return ""
+        return format_display_title(
+            self._media.title,
+            self._media.artist,
+            capitalize_first=Settings.capitalize_title,
+        )
+
     def update_lyric(self, snap: bool = False) -> None:
         if self._current_view == View.MEDIA_BIG:
             self.update_player_lyric(snap)
@@ -1730,7 +2178,7 @@ class MainWindow(Gtk.Window):
             return
 
         target = self.compact_lyric_target()
-        text = target[0] if target else (self._media.title if self._media.has_track else "")
+        text = target[0] if target else self.compact_track_title()
         target_t = target[1] if target else None
         line_key = (target_t, text)
 
@@ -1802,12 +2250,16 @@ class MainWindow(Gtk.Window):
     def _advance_lyric_scroll(self, dt: float) -> bool:
         span = self._lyric_span if self._lyric_span > 0.0 else 3.0
         elapsed = max(0.0, min(span, self._media.position - self._lyric_line_start))
-        hold = min(0.6, span * 0.2)
-        run = min(self._lyric_overflow / LYRIC_SPEED, max(span - hold - 0.5, 0.6))
-        if elapsed <= hold:
+        hold_start = min(0.5, span * 0.15)
+        hold_end = min(0.6, span * 0.15)
+        run_span = max(0.5, span - hold_start - hold_end)
+
+        if elapsed <= hold_start:
             target = 0.0
+        elif elapsed >= span - hold_end:
+            target = -self._lyric_overflow
         else:
-            k = min(1.0, max(0.0, (elapsed - hold) / run))
+            k = (elapsed - hold_start) / run_span
             target = -self._lyric_overflow * (0.5 - 0.5 * math.cos(math.pi * k))
 
         if abs(target - self._lyric_scroll) < 0.05:
@@ -1826,6 +2278,12 @@ class MainWindow(Gtk.Window):
             self._player_room = room
             self._h.tune(280, 30)
             self.set_targets()
+
+        wait = room and len(lines) == 0
+        if wait:
+            palette = [Settings.accent, *self._media.palette] if Settings.accent else self._media.palette
+            self._shimmer.tint(palette)
+        self._shimmer.run(wait)
 
     def start_timer(self, seconds: float) -> None:
         self._timer.start(seconds)
@@ -1923,6 +2381,16 @@ class MainWindow(Gtk.Window):
         self.sync_rim()
         self.area.queue_draw()
 
+    def destroy(self) -> None:
+        for s in ("_network", "_audio", "_media", "_battery", "_spectrum", "_alarm"):
+            srv = getattr(self, s, None)
+            if srv and hasattr(srv, "stop"):
+                try:
+                    srv.stop()
+                except Exception:
+                    pass
+        super().destroy()
+
     def exit_island(self) -> None:
         self._alarm.stop()
         self.get_application().quit()
@@ -1956,9 +2424,13 @@ class MainWindow(Gtk.Window):
         bubble_rect = None
         if apart:
             pill_right = w / 2.0
-            past = ((BUBBLE_GAP + BUBBLE_WIDTH) * split - BUBBLE_WIDTH) / scale
+            timer_w = self._carry_timer.value * CARRY_TIMER
+            shelf_w = self._carry_shelf.value * self._shelf_wide.value
+            both = (self._carry_timer.value > 0.05 and self._carry_shelf.value > 0.05)
+            base_bw = max(CARRY_SHELF, timer_w + shelf_w + (6.0 if both else 0.0))
+            past = ((BUBBLE_GAP + base_bw) * split - base_bw) / scale
             bx = pill_right + past
-            bw = BUBBLE_WIDTH * bubble_scale / scale
+            bw = base_bw * bubble_scale / scale
             bh = BUBBLE_HEIGHT * bubble_scale / scale
             bubble_rect = (bx, 0.0, bw, bh)
 
@@ -2015,24 +2487,69 @@ class MainWindow(Gtk.Window):
             if bubble_alpha > 0.01:
                 cr.save()
                 clip_rounded_rect(cr, bx, by, bw, bh, bh / 2.0)
-                Ring.render(
-                    cr,
-                    cx=bx + 18.0,
-                    cy=by + bh / 2.0,
-                    radius=8.0,
-                    progress=self._timer.share,
-                    color=self._timer_tint,
-                    thickness=2.2,
-                )
-                self._digits_bubble.render(
-                    cr,
-                    x=bx + bw - 10.0,
-                    y=by + bh / 2.0,
-                    font_size=12.5,
-                    color=self._timer_tint,
-                    align="right",
-                    valign="center",
-                )
+                timer_on = self._carry_timer.value > 0.05
+                shelf_on = self._carry_shelf.value > 0.05
+                if timer_on and shelf_on:
+                    t_w = CARRY_TIMER
+                    Ring.render(
+                        cr,
+                        cx=bx + 16.0,
+                        cy=by + bh / 2.0,
+                        radius=8.0,
+                        progress=self._timer.share,
+                        color=self._timer_tint,
+                        thickness=2.2,
+                    )
+                    self._digits_bubble.render(
+                        cr,
+                        x=bx + t_w - 6.0,
+                        y=by + bh / 2.0,
+                        font_size=12.5,
+                        color=self._timer_tint,
+                        align="right",
+                        valign="center",
+                    )
+                    sx = bx + t_w + 6.0
+                    render_icon(cr, Glyph.Tray, sx + 6.0, by + bh / 2.0 - 7.0, 14.0, COLOR_DIM[:3], alpha=bubble_alpha)
+                    self._digits_shelf.render(
+                        cr,
+                        x=bx + bw - 10.0,
+                        y=by + bh / 2.0,
+                        font_size=12.5,
+                        color=COLOR_WHITE,
+                        align="right",
+                        valign="center",
+                    )
+                elif timer_on:
+                    Ring.render(
+                        cr,
+                        cx=bx + 18.0,
+                        cy=by + bh / 2.0,
+                        radius=8.0,
+                        progress=self._timer.share,
+                        color=self._timer_tint,
+                        thickness=2.2,
+                    )
+                    self._digits_bubble.render(
+                        cr,
+                        x=bx + bw - 10.0,
+                        y=by + bh / 2.0,
+                        font_size=12.5,
+                        color=self._timer_tint,
+                        align="right",
+                        valign="center",
+                    )
+                elif shelf_on:
+                    render_icon(cr, Glyph.Tray, bx + 12.0, by + bh / 2.0 - 7.0, 14.0, COLOR_DIM[:3], alpha=bubble_alpha)
+                    self._digits_shelf.render(
+                        cr,
+                        x=bx + bw - 12.0,
+                        y=by + bh / 2.0,
+                        font_size=12.5,
+                        color=COLOR_WHITE,
+                        align="right",
+                        valign="center",
+                    )
                 cr.restore()
 
         cr.restore()
@@ -2060,6 +2577,8 @@ class MainWindow(Gtk.Window):
             self.render_volume(cr, px, py, pw, ph, alpha)
         elif view == View.CHARGE:
             self.render_charge(cr, px, py, pw, ph, alpha)
+        elif view == View.FOCUS:
+            self.render_focus(cr, px, py, pw, ph, alpha)
         elif view == View.TOAST:
             self.render_toast(cr, px, py, pw, ph, alpha)
         elif view == View.NOTICE:
@@ -2078,6 +2597,8 @@ class MainWindow(Gtk.Window):
             self.render_settings(cr, px, py, pw, ph, alpha)
         elif view == View.LOOK:
             self.render_look(cr, px, py, pw, ph, alpha)
+        elif view == View.SHELF:
+            self.render_shelf(cr, px, py, pw, ph, alpha)
 
     def render_idle(self, cr: cairo.Context, px: float, py: float, pw: float, ph: float, alpha: float) -> None:
         draw_text(
@@ -2115,10 +2636,11 @@ class MainWindow(Gtk.Window):
         mid_w = eq_x - mid_x - 7.0
         if mid_w > 10.0:
             target = self._lyric_target
-            lyric_text = target[0] if target else (self._media.title if self._media.has_track else "")
+            lyric_text = target[0] if target else self.compact_track_title()
             has_lyric = target is not None and bool(lyric_text.strip())
 
             if has_lyric and Settings.lyrics:
+                has_words = self.lyrics_have_words()
                 prev_a = self._lyric_prev_alpha.value
                 if prev_a > 0.01 and self._lyric_prev_text:
                     p_prev, d_prev = self.lyric_phase(self._lyric_prev_target)
@@ -2134,7 +2656,7 @@ class MainWindow(Gtk.Window):
                         h=ph,
                         alpha=prev_a * alpha,
                         dim=d_prev,
-                        progress=p_prev,
+                        progress=p_prev if has_words else None,
                     )
 
                 enter = self._lyric_enter.value
@@ -2151,7 +2673,7 @@ class MainWindow(Gtk.Window):
                     h=ph,
                     alpha=enter * alpha,
                     dim=dim,
-                    progress=prog,
+                    progress=prog if has_words else None,
                 )
             else:
                 draw_text(
@@ -2402,15 +2924,7 @@ class MainWindow(Gtk.Window):
         rows = self.player_lyric_rows()
 
         if not rows:
-            render_wait(
-                cr,
-                px + pw / 2.0,
-                lyric_y + room / 2.0,
-                progress=self._wait_progress(None),
-                alpha=alpha,
-                now=time.monotonic(),
-                tint=COLOR_WHITE[:3],
-            )
+            self._shimmer.render(cr, lyric_x, lyric_y, lyric_w, room, alpha)
             return
 
         at = self._media.position + LYRIC_LEAD
@@ -2524,6 +3038,7 @@ class MainWindow(Gtk.Window):
                     LyricLine.render_karaoke(
                         cr, line_text, prog, lyric_x, y, lyric_w, h_a,
                         font_size=player_lyric_font(), is_active=True, alpha=line_a,
+                        vertical_fill=not self.lyrics_have_words(),
                     )
                 elif i == self._player_prev_active and active >= 0:
                     line_a = alpha * max(0.35, 1.0 - 0.60 * t_anim)
@@ -2702,6 +3217,9 @@ class MainWindow(Gtk.Window):
     def render_idle_big(self, cr: cairo.Context, px: float, py: float, pw: float, ph: float, alpha: float) -> None:
         draw_text(cr, self._clock_time_str, px + 26.0, py + 48.0, font_size=46.0, bold=True, color=COLOR_WHITE, alpha=alpha, align="left", valign="center")
         draw_text(cr, self._clock_date_str, px + 28.0, py + 86.0, font_size=13.0, bold=False, color=COLOR_DIM[:3], alpha=alpha, align="left", valign="center")
+        if self._quiet:
+            date_w = measure_text(cr, self._clock_date_str, 13.0, bold=False)
+            render_icon(cr, Glyph.Moon, px + 28.0 + date_w + 6.0, py + 79.0, 13.0, COLOR_INDIGO, alpha=alpha)
 
         rx = px + pw - 24.0
         render_icon(cr, Glyph.Loud, rx - 54.0, py + 32.0, 16.0, COLOR_DIM[:3], alpha=alpha)
@@ -2715,6 +3233,124 @@ class MainWindow(Gtk.Window):
         if self._battery_known:
             render_icon(cr, Glyph.Battery, rx - 54.0, py + 84.0, 16.0, COLOR_DIM[:3], alpha=alpha)
             draw_text(cr, f"{self._battery_pct}%", rx, py + 92.0, font_size=13.0, bold=True, color=COLOR_GREEN if self._last_plugged else COLOR_WHITE, alpha=alpha, align="right", valign="center")
+
+    def render_focus(self, cr: cairo.Context, px: float, py: float, pw: float, ph: float, alpha: float) -> None:
+        if alpha <= 0.001:
+            return
+        quiet = bool(self._quiet)
+        col = COLOR_INDIGO if quiet else COLOR_DIM[:3]
+
+        cr.save()
+        icon_cx = px + 12.0 + 9.0
+        icon_cy = py + ph / 2.0
+        cr.translate(icon_cx, icon_cy)
+        cr.rotate(math.radians(self._focus_swing.value))
+        s = max(0.1, self._focus_scale.value)
+        cr.scale(s, s)
+        render_icon(cr, Glyph.Moon, -9.0, -9.0, 18.0, col, alpha=alpha)
+        cr.restore()
+
+        draw_text(cr, "Не беспокоить", px + 38.0, py + ph / 2.0, font_size=13.0, bold=False, color=COLOR_WHITE, alpha=alpha, align="left", valign="center")
+        draw_text(cr, "Вкл." if quiet else "Выкл.", px + pw - 14.0, py + ph / 2.0, font_size=13.0, bold=True, color=col, alpha=alpha, align="right", valign="center")
+
+    def render_shelf(self, cr: cairo.Context, px: float, py: float, pw: float, ph: float, alpha: float) -> None:
+        if alpha <= 0.001:
+            return
+
+        render_icon(cr, Glyph.Back, px + 20.0, py + 18.0, 10.0, COLOR_DIM[:3], alpha=0.6 * alpha)
+        draw_text(cr, "ПОЛКА", px + 36.0, py + 23.0, font_size=10.5, bold=True, color=COLOR_DIM[:3], alpha=0.6 * alpha, align="left", valign="center")
+
+        text_w, _ = measure_text(cr, "Очистить", pw, 10.5 * Settings.text_factor())
+        btn_clear_w = max(66.0, text_w + 16.0)
+        btn_clear_x = px + pw - 18.0 - btn_clear_w
+        btn_clear_y = py + 12.0
+        btn_add_x = btn_clear_x - 8.0 - 24.0
+        btn_add_y = py + 12.0
+
+        self._shelf_btn_add_rect = (btn_add_x, btn_add_y, 24.0, 24.0)
+        cr.save()
+        draw_rounded_rect(cr, btn_add_x, btn_add_y, 24.0, 24.0, 12.0)
+        cr.set_source_rgba(1.0, 1.0, 1.0, 0.12 * alpha)
+        cr.fill()
+        render_icon(cr, Glyph.Plus, btn_add_x + 6.0, btn_add_y + 6.0, 12.0, COLOR_WHITE[:3], alpha=alpha)
+        cr.restore()
+
+        self._shelf_btn_clear_rect = (btn_clear_x, btn_clear_y, btn_clear_w, 24.0)
+        cr.save()
+        draw_rounded_rect(cr, btn_clear_x, btn_clear_y, btn_clear_w, 24.0, 12.0)
+        cr.set_source_rgba(1.0, 1.0, 1.0, 0.12 * alpha)
+        cr.fill()
+        draw_text(cr, "Очистить", btn_clear_x + btn_clear_w / 2.0, btn_clear_y + 12.0, font_size=10.5, bold=False, color=COLOR_WHITE[:3], alpha=alpha, align="center", valign="center")
+        cr.restore()
+
+        strip_x = px + 18.0
+        strip_y = py + 42.0
+        strip_w = pw - 36.0
+        strip_h = 80.0
+
+        if not self._shelf.items:
+            draw_text(cr, "Перетащите сюда файлы", px + pw / 2.0, strip_y + 24.0, font_size=12.5, bold=False, color=COLOR_WHITE[:3], alpha=0.6 * alpha, align="center", valign="center")
+            draw_text(cr, "или нажмите, чтобы выбрать", px + pw / 2.0, strip_y + 44.0, font_size=11.0, bold=False, color=COLOR_WHITE[:3], alpha=0.35 * alpha, align="center", valign="center")
+            return
+
+        cr.save()
+        clip_rounded_rect(cr, strip_x, strip_y, strip_w, strip_h, 14.0)
+
+        offset_x = self._shelf_scroll.value
+        for idx, item in enumerate(self._shelf.items):
+            tx = strip_x - offset_x + idx * 68.0
+            ty = strip_y + 4.0
+            if tx + 64.0 < strip_x or tx > strip_x + strip_w:
+                continue
+
+            cr.save()
+            cx = tx + 28.0
+            cy = ty + 28.0
+            cr.translate(cx, cy)
+            swell = item.swell.value
+            cr.scale(swell, swell)
+            cr.translate(-28.0, -28.0)
+
+            draw_rounded_rect(cr, 0.0, 0.0, 56.0, 56.0, 13.0)
+            cr.set_source_rgba(1.0, 1.0, 1.0, 0.12 * alpha)
+            cr.fill()
+
+            if item.surface is not None:
+                cr.save()
+                draw_rounded_rect(cr, 0.0, 0.0, 56.0, 56.0, 13.0)
+                cr.clip()
+                sw = item.surface.get_width()
+                sh = item.surface.get_height()
+                if sw > 0 and sh > 0:
+                    scale_img = max(56.0 / sw, 56.0 / sh)
+                    cr.scale(scale_img, scale_img)
+                    cr.set_source_surface(item.surface, (56.0 / scale_img - sw) / 2.0, (56.0 / scale_img - sh) / 2.0)
+                    cr.paint_with_alpha(alpha)
+                cr.restore()
+            else:
+                render_icon(cr, Glyph.Tray, 14.0, 14.0, 28.0, COLOR_DIM[:3], alpha=alpha)
+
+            cr.restore()
+
+            draw_text(cr, item.name, tx + 28.0, ty + 64.0, font_size=10.0, bold=False, color=COLOR_WHITE[:3], alpha=0.7 * alpha, align="center", valign="center", max_w=60.0)
+
+            cross_a = item.cross.value * alpha
+            if cross_a > 0.01:
+                cross_x = tx + 44.0
+                cross_y = ty - 4.0
+                cr.save()
+                cr.new_sub_path()
+                cr.arc(cross_x + 9.0, cross_y + 9.0, 9.0, 0.0, 2.0 * math.pi)
+                cr.set_source_rgba(0.28, 0.28, 0.29, cross_a)
+                cr.fill_preserve()
+                cr.set_source_rgba(0.0, 0.0, 0.0, cross_a)
+                cr.set_line_width(2.0)
+                cr.stroke()
+
+                render_icon(cr, Glyph.Cross, cross_x + 4.5, cross_y + 4.5, 9.0, COLOR_WHITE[:3], alpha=cross_a)
+                cr.restore()
+
+        cr.restore()
 
     def render_timer_big(self, cr: cairo.Context, px: float, py: float, pw: float, ph: float, alpha: float) -> None:
         p_cx = px + 45.0
@@ -2785,8 +3421,10 @@ class MainWindow(Gtk.Window):
 
         self._row_list_menu.render_highlight(cr, w=pw - 20.0, x=px + 10.0)
 
+        shelf_count_str = str(len(self._shelf.items)) if self._shelf.items else ""
         rows = [
             (Glyph.Clock, "Таймер", self._timer.formatted if self._timer.active else "", COLOR_ORANGE if self._timer.active else COLOR_DIM[:3]),
+            (Glyph.Tray, "Полка", shelf_count_str, COLOR_DIM[:3]),
             (Glyph.Gear, "Настройки", "", COLOR_DIM[:3]),
             (Glyph.Look, "Оформление", "", COLOR_DIM[:3]),
             (Glyph.Power, "Закрыть остров", "", COLOR_RED),
@@ -2817,6 +3455,7 @@ class MainWindow(Gtk.Window):
             (Glyph.Expand, "Скрывать на полном экране", "hide_fullscreen"),
             (Glyph.Clock, "Задержка при анимации", "click_lock"),
             (Glyph.Linux, "Запускать при старте", "autostart"),
+            (Glyph.Lines, "Заглавная буква в названии", "capitalize_title"),
         ]
         row_y_start = py + 44.0
         row_h = 40.0

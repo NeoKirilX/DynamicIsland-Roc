@@ -46,6 +46,9 @@ class Glyph(Enum):
     Size = auto()
     Gap = auto()
     Drop = auto()
+    Moon = auto()
+    Tray = auto()
+    Cross = auto()
 
 @dataclass(frozen=True)
 class Art:
@@ -171,6 +174,17 @@ ARTS: dict[Glyph, Art] = {
     ),
     Glyph.Drop: Art(
         "M12,4 C9.6,7.4 6.2,11 6.2,14.4 A5.8,5.8 0 0 0 17.8,14.4 C17.8,11 14.4,7.4 12,4 Z"
+    ),
+    Glyph.Moon: Art(
+        "M10.58,4.44 A8.2,8.2 0 1 0 19.52,13.74 A6.8,6.8 0 0 1 10.58,4.44 Z"
+    ),
+    Glyph.Tray: Art(
+        lines="M4,13.5 L6.4,6.2 A1.6,1.6 0 0 1 7.9,5.1 H16.1 A1.6,1.6 0 0 1 17.6,6.2 L20,13.5 V17.6 A2,2 0 0 1 18,19.6 H6 A2,2 0 0 1 4,17.6 Z M4,13.5 H8.6 L9.8,15.6 H14.2 L15.4,13.5 H20",
+        line=2.0,
+    ),
+    Glyph.Cross: Art(
+        lines="M7.5,7.5 L16.5,16.5 M16.5,7.5 L7.5,16.5",
+        line=2.6,
     ),
 }
 

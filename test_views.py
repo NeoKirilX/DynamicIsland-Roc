@@ -12,7 +12,7 @@ import gi
 gi.require_version("Gtk", "4.0")
 gi.require_version("Gdk", "4.0")
 gi.require_version("Gtk4LayerShell", "1.0")
-from gi.repository import Gtk, GLib
+from gi.repository import Gtk, GLib, Gio
 
 from main_window import MainWindow, View, Panel
 from settings import Settings
@@ -20,10 +20,13 @@ import cairo
 
 def test_views():
     print("=" * 60)
-    print("Testing DynamicIsland MainWindow and 14 Island Views...")
+    print("Testing DynamicIsland MainWindow and 16 Island Views...")
     print("=" * 60)
 
-    app = Gtk.Application(application_id="io.github.dynamic_island.test_views")
+    app = Gtk.Application(
+        application_id="io.github.dynamic_island.test_views",
+        flags=Gio.ApplicationFlags.NON_UNIQUE,
+    )
 
     views_to_test = [
         "Idle",
@@ -31,6 +34,7 @@ def test_views():
         "Timer",
         "Volume",
         "Charge",
+        "Focus",
         "Toast",
         "Notice",
         "MediaBig",
@@ -40,6 +44,7 @@ def test_views():
         "Menu",
         "Settings",
         "Look",
+        "Shelf",
     ]
 
     def on_activate(application):
@@ -60,7 +65,7 @@ def test_views():
             win.destroy()
             print("OK!")
 
-        print("\nAll 14 views rendered successfully without errors!")
+        print("\nAll 16 views rendered successfully without errors!")
 
         print("\nTesting interactive panel transitions and clicks...")
         win = MainWindow(application)
@@ -94,6 +99,12 @@ def test_views():
         assert win._panel == Panel.LOOK
         assert win._current_view == View.LOOK
         print("  Panel.LOOK opened successfully ->", win._current_view)
+
+        win.open_panel(Panel.SHELF)
+        win.update_view()
+        assert win._panel == Panel.SHELF
+        assert win._current_view == View.SHELF
+        print("  Panel.SHELF opened successfully ->", win._current_view)
 
         win.start_timer(60.0)
         assert win._timer.active

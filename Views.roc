@@ -20,6 +20,7 @@ View : [
     Timer,
     Volume,
     Charge,
+    Focus,
     Toast,
     Notice,
     MediaBig,
@@ -29,6 +30,7 @@ View : [
     Menu,
     Settings,
     Look,
+    Shelf,
 ]
 
 Panel : [
@@ -39,6 +41,7 @@ Panel : [
     Menu,
     Settings,
     Look,
+    Shelf,
 ]
 
 Dims : {
@@ -54,6 +57,7 @@ allViews = [
     Timer,
     Volume,
     Charge,
+    Focus,
     Toast,
     Notice,
     MediaBig,
@@ -63,6 +67,7 @@ allViews = [
     Menu,
     Settings,
     Look,
+    Shelf,
 ]
 
 bubbleWidth : F64
@@ -77,7 +82,7 @@ bubbleGap = 7.0
 isCompact : View -> Bool
 isCompact = |view|
     when view is
-        Idle | Media | Timer | Volume | Charge -> Bool.true
+        Idle | Media | Timer | Volume | Charge | Focus -> Bool.true
         _ -> Bool.false
 
 isExpanded : View -> Bool
@@ -93,6 +98,7 @@ viewToPanel = |view|
         Menu -> Menu
         Settings -> Settings
         Look -> Look
+        Shelf -> Shelf
         _ -> None
 
 panelToView : Panel -> View
@@ -104,6 +110,7 @@ panelToView = |panel|
         Menu -> Menu
         Settings -> Settings
         Look -> Look
+        Shelf -> Shelf
         None -> Idle
 
 dimsForView : View, Bool -> Dims
@@ -114,6 +121,7 @@ dimsForView = |view, hasLyrics|
         Timer -> { w: 132.0, h: 34.0, r: 17.0 }
         Volume -> { w: 250.0, h: 34.0, r: 17.0 }
         Charge -> { w: 230.0, h: 34.0, r: 17.0 }
+        Focus -> { w: 236.0, h: 34.0, r: 17.0 }
         Toast -> { w: 340.0, h: 68.0, r: 30.0 }
         Notice -> { w: 320.0, h: 64.0, r: 29.0 }
         MediaBig ->
@@ -124,8 +132,9 @@ dimsForView = |view, hasLyrics|
         TimerBig -> { w: 330.0, h: 92.0, r: 40.0 }
         TimerSet -> { w: 300.0, h: 190.0, r: 38.0 }
         Menu -> { w: 300.0, h: 208.0, r: 34.0 }
-        Settings -> { w: 320.0, h: 374.0, r: 34.0 }
+        Settings -> { w: 320.0, h: 414.0, r: 34.0 }
         Look -> { w: 320.0, h: 208.0, r: 34.0 }
+        Shelf -> { w: 380.0, h: 136.0, r: 34.0 }
 
 resolveView : {
     panel : Panel,
@@ -139,6 +148,7 @@ resolveView = |{ panel, hasMedia, timerActive, isCharging, transientView }|
         Menu -> Menu
         Settings -> Settings
         Look -> Look
+        Shelf -> Shelf
         TimerSet -> TimerSet
         Timer if timerActive -> TimerBig
         Timer | Player if hasMedia -> MediaBig
@@ -157,7 +167,15 @@ resolveView = |{ panel, hasMedia, timerActive, isCharging, transientView }|
                 _ -> target
 
 expect
-    List.len allViews == 14
+    List.len allViews == 16
+
+expect
+    dFocus = dimsForView Focus Bool.false
+    dShelf = dimsForView Shelf Bool.false
+    Num.is_approx_eq dFocus.w 236.0 {}
+    and Num.is_approx_eq dFocus.h 34.0 {}
+    and Num.is_approx_eq dShelf.w 380.0 {}
+    and Num.is_approx_eq dShelf.h 136.0 {}
 
 expect
     dIdle = dimsForView Idle Bool.false
@@ -219,7 +237,7 @@ expect
     and Num.is_approx_eq dMenu.h 208.0 {}
     and Num.is_approx_eq dMenu.r 34.0 {}
     and Num.is_approx_eq dSettings.w 320.0 {}
-    and Num.is_approx_eq dSettings.h 374.0 {}
+    and Num.is_approx_eq dSettings.h 414.0 {}
     and Num.is_approx_eq dSettings.r 34.0 {}
     and Num.is_approx_eq dLook.w 320.0 {}
     and Num.is_approx_eq dLook.h 208.0 {}

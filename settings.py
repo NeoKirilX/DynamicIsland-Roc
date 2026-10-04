@@ -66,6 +66,14 @@ class _SettingsMeta(type):
         cls._set("lyric_effects", bool(value))
 
     @property
+    def lyric_anim(cls) -> str:
+        return str(cls._data.get("lyric_anim", "auto"))
+
+    @lyric_anim.setter
+    def lyric_anim(cls, value: str) -> None:
+        cls._set("lyric_anim", str(value))
+
+    @property
     def LyricEffects(cls) -> bool:
         return cls.lyric_effects
 
@@ -152,6 +160,22 @@ class _SettingsMeta(type):
     @ClickLock.setter
     def ClickLock(cls, value: bool) -> None:
         cls.click_lock = value
+
+    @property
+    def capitalize_title(cls) -> bool:
+        return cls._get_bool("capitalize_title", True)
+
+    @capitalize_title.setter
+    def capitalize_title(cls, value: bool) -> None:
+        cls._set("capitalize_title", bool(value))
+
+    @property
+    def CapitalizeTitle(cls) -> bool:
+        return cls.capitalize_title
+
+    @CapitalizeTitle.setter
+    def CapitalizeTitle(cls, value: bool) -> None:
+        cls.capitalize_title = value
 
     @property
     def scale(cls) -> int:
@@ -300,6 +324,25 @@ class _SettingsMeta(type):
         cls.accent = value
 
     @property
+    def shelf(cls) -> list[str]:
+        raw = cls._data.get("shelf")
+        if isinstance(raw, list):
+            return [str(x) for x in raw if isinstance(x, str)]
+        return []
+
+    @shelf.setter
+    def shelf(cls, value: list[str]) -> None:
+        cls._set("shelf", [str(x) for x in value] if value else [])
+
+    @property
+    def Shelf(cls) -> list[str]:
+        return cls.shelf
+
+    @Shelf.setter
+    def Shelf(cls, value: list[str]) -> None:
+        cls.shelf = value
+
+    @property
     def autostart(cls) -> bool:
         try:
             return Autostart.is_enabled()
@@ -423,6 +466,7 @@ if __name__ == "__main__":
     print(f"AppVolume: {Settings.app_volume}")
     print(f"Network: {Settings.network}")
     print(f"HideFullscreen: {Settings.hide_fullscreen}")
+    print(f"CapitalizeTitle: {Settings.capitalize_title}")
     print(f"Scale: {Settings.scale}")
     print(f"Gap: {Settings.gap}")
     print(f"Accent: {Settings.accent}")

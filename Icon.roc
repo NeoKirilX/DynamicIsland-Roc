@@ -31,6 +31,9 @@ Glyph : [
     Size,
     Gap,
     Drop,
+    Moon,
+    Tray,
+    Cross,
 ]
 
 PathCmd : [
@@ -84,6 +87,9 @@ allGlyphs = [
     Size,
     Gap,
     Drop,
+    Moon,
+    Tray,
+    Cross,
 ]
 
 getIconArt : Glyph -> IconArt
@@ -733,7 +739,65 @@ getIconArt = |glyph|
                 over: [],
             }
 
-expect List.len allGlyphs == 30
+        Moon ->
+            {
+                solid: [
+                    M 10.58 4.44,
+                    A 8.2 8.2 0.0 Bool.true Bool.false 19.52 13.74,
+                    A 6.8 6.8 0.0 Bool.false Bool.true 10.58 4.44,
+                    Z,
+                ],
+                lines: [],
+                lineWidth: 2.0,
+                cut: [],
+                cutWidth: 2.0,
+                over: [],
+            }
+
+        Tray ->
+            {
+                solid: [],
+                lines: [
+                    M 4.0 13.5,
+                    L 6.4 6.2,
+                    A 1.6 1.6 0.0 Bool.false Bool.true 7.9 5.1,
+                    H 16.1,
+                    A 1.6 1.6 0.0 Bool.false Bool.true 17.6 6.2,
+                    L 20.0 13.5,
+                    V 17.6,
+                    A 2.0 2.0 0.0 Bool.false Bool.true 18.0 19.6,
+                    H 6.0,
+                    A 2.0 2.0 0.0 Bool.false Bool.true 4.0 17.6,
+                    Z,
+                    M 4.0 13.5,
+                    H 8.6,
+                    L 9.8 15.6,
+                    H 14.2,
+                    L 15.4 13.5,
+                    H 20.0,
+                ],
+                lineWidth: 2.0,
+                cut: [],
+                cutWidth: 2.0,
+                over: [],
+            }
+
+        Cross ->
+            {
+                solid: [],
+                lines: [
+                    M 7.5 7.5,
+                    L 16.5 16.5,
+                    M 16.5 7.5,
+                    L 7.5 16.5,
+                ],
+                lineWidth: 2.6,
+                cut: [],
+                cutWidth: 2.0,
+                over: [],
+            }
+
+expect List.len allGlyphs == 33
 expect List.len (getIconArt Mute).solid == 7
 expect List.len (getIconArt Mute).lines == 4
 expect List.len (getIconArt Quiet).lines == 2
@@ -749,7 +813,7 @@ expect List.len (getIconArt Wired).solid == 9
 expect List.len (getIconArt Wired).cut == 6
 expect List.len (getIconArt Windows).solid == 20
 expect List.len (getIconArt Linux).solid == 17
-expect List.len (List.map allGlyphs getIconArt) == 30
+expect List.len (List.map allGlyphs getIconArt) == 33
 expect Num.is_approx_eq (getIconArt Mute).lineWidth 2.0 {}
 expect Num.is_approx_eq (getIconArt Offline).lineWidth 2.2 {}
 expect Num.is_approx_eq (getIconArt Offline).cutWidth 5.4 {}

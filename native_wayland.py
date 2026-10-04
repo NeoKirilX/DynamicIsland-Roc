@@ -299,6 +299,69 @@ def is_ctrl_down() -> bool:
 
 ctrl_down = is_ctrl_down
 
+def query_do_not_disturb() -> Optional[bool]:
+    try:
+        import gi
+        gi.require_version("Gio", "2.0")
+        from gi.repository import Gio, GLib
+        bus = Gio.bus_get_sync(Gio.BusType.SESSION, None)
+        res = bus.call_sync(
+            "org.freedesktop.Notifications",
+            "/org/freedesktop/Notifications",
+            "org.freedesktop.DBus.Properties",
+            "Get",
+            GLib.Variant("(ss)", ("org.freedesktop.Notifications", "Inhibited")),
+            GLib.VariantType("(v)"),
+            Gio.DBusCallFlags.NONE,
+            200,
+            None,
+        )
+        if res:
+            val = res.unpack()[0]
+            if isinstance(val, bool):
+                return val
+    except Exception:
+        pass
+
+    if shutil.which("swaync-client"):
+        try:
+            res = subprocess.run(["swaync-client", "-D"], capture_output=True, text=True, timeout=0.3)
+            if res.returncode == 0:
+                txt = res.stdout.strip().lower()
+                if txt in ("true", "1"):
+                    return True
+                if txt in ("false", "0"):
+                    return False
+        except Exception:
+            pass
+
+    if shutil.which("dunstctl"):
+        try:
+            res = subprocess.run(["dunstctl", "is-paused"], capture_output=True, text=True, timeout=0.3)
+            if res.returncode == 0:
+                txt = res.stdout.strip().lower()
+                if txt == "true":
+                    return True
+                if txt == "false":
+                    return False
+        except Exception:
+            pass
+
+    if shutil.which("gsettings"):
+        try:
+            res = subprocess.run(
+                ["gsettings", "get", "org.gnome.desktop.notifications", "show-banners"],
+                capture_output=True,
+                text=True,
+                timeout=0.3,
+            )
+            if res.returncode == 0:
+                return res.stdout.strip().lower() == "false"
+        except Exception:
+            pass
+
+    return None
+
 class Autostart:
 
     DESKTOP_PATH = AUTOSTART_FILE

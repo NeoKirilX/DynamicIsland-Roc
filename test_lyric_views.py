@@ -43,7 +43,7 @@ def cr_8() -> cairo.Context:
 def fake_media(win: MainWindow, position: float) -> None:
     win._lyrics.for_duration = lambda duration: list(LINES)
     win._lyrics.get_current_line = lambda pos, duration, lead=0.0: (1, LINES[1])
-    win._media._duration = 24.0
+    win._media._duration = 180.0
     win._media._position = position
     win._media._position_at = time.monotonic()
 
@@ -169,6 +169,7 @@ def on_activate(application) -> None:
 
     print("\n[compact island] first lyric line animates after toast")
     toast_win = MainWindow(application, forced_timer=45.0)
+    toast_win._media._current_player = "test"
     toast_win._media._has_track = True
     toast_win._media._title = "New Song"
     toast_win._media._artist = "Artist"
@@ -190,10 +191,12 @@ def on_activate(application) -> None:
     print("\n[compact island] duplicate consecutive lines animate on change")
     dup_win = MainWindow(application, forced_timer=45.0)
     dup_lines = [(10.0, "Repeated refrain"), (15.0, "Repeated refrain"), (20.0, "Final line")]
+    dup_win._media._current_player = "test"
     dup_win._media._has_track = True
     dup_win._media._title = "Repeated Song"
     dup_win._media._duration = 60.0
     dup_win._media._position = 10.0
+    dup_win._media._is_playing = True
     dup_win._lyrics.for_duration = lambda d: dup_lines
     dup_win._lyrics.get_current_line = lambda pos, dur, lead=0.0: (0, dup_lines[0])
     show(dup_win, View.MEDIA, Panel.NONE)
@@ -218,9 +221,11 @@ def on_activate(application) -> None:
     arm_win = MainWindow(application, forced_timer=45.0)
     arm_lines = [(10.0, "Future line")]
     arm_win._media._has_track = True
+    arm_win._media._current_player = "test"
     arm_win._media._title = "Lookahead Song"
     arm_win._media._duration = 60.0
     arm_win._media._position = 8.5
+    arm_win._media._is_playing = True
     arm_win._lyrics.for_duration = lambda d: arm_lines
     arm_win._lyrics.get_current_line = lambda pos, dur, lead=0.0: (-1, None)
     show(arm_win, View.MEDIA, Panel.NONE)
@@ -240,7 +245,9 @@ def on_activate(application) -> None:
 
     print("\n[compact island] repeated phrases >= 4 split into x1..x4")
     rep_win = MainWindow(application, forced_timer=45.0)
+    rep_win._media._current_player = "test"
     rep_win._media._has_track = True
+    rep_win._media._is_playing = True
     rep_win._media._duration = 30.0
     rep_lines = [
         (10.0, "Будь котом, будь котом"),
@@ -259,10 +266,12 @@ def on_activate(application) -> None:
     check(c_lines[4][1] == "Другая строчка", f"normal line untouched: {c_lines[4][1]!r}")
 
     rep_win._media._position = 10.5
+    rep_win._media._position_at = time.monotonic()
     rep_win.on_periodic_tick()
     check(rep_win._lyric_target is not None and "х1" in rep_win._lyric_target[0], f"at 10.5s target is x1: {rep_win._lyric_target[0] if rep_win._lyric_target else None}")
 
     rep_win._media._position = 12.5
+    rep_win._media._position_at = time.monotonic()
     rep_win.on_periodic_tick()
     check(rep_win._lyric_target is not None and "х2" in rep_win._lyric_target[0], f"at 12.5s target is x2: {rep_win._lyric_target[0] if rep_win._lyric_target else None}")
     rep_win.destroy()
@@ -280,6 +289,22 @@ def on_activate(application) -> None:
     check(p_lines[1][1] == "я не болен х2", f"brackets trimmed on combo 2: {p_lines[1][1]!r}")
     check(p_lines[5][1] == "я не болен х6", f"brackets trimmed on combo 6: {p_lines[5][1]!r}")
     check("(" not in p_lines[0][1] and ")" not in p_lines[0][1], "no parentheses in combo text")
+
+    print("\n[compact island] ad-lib interjections like (у) do not break combo chain")
+    adlib_lines = [
+        (0.0, "переломай мои кости"),
+        (2.0, "переломай мои кости"),
+        (4.0, "переломай мои кости (у)"),
+        (6.0, "переломай мои кости"),
+        (8.0, "переломай мои кости"),
+    ]
+    adlib_res = MainWindow._process_compact_lines(adlib_lines, 12.0)
+    check(len(adlib_res) == 5, f"all 5 lines comboed despite (у) (got {len(adlib_res)})")
+    check(adlib_res[0][1] == "переломай мои кости х1", f"line 0 is x1: {adlib_res[0][1]!r}")
+    check(adlib_res[1][1] == "переломай мои кости х2", f"line 1 is x2: {adlib_res[1][1]!r}")
+    check(adlib_res[2][1] == "переломай мои кости (у) х3", f"line 2 has (у) x3: {adlib_res[2][1]!r}")
+    check(adlib_res[3][1] == "переломай мои кости х4", f"line 3 is x4: {adlib_res[3][1]!r}")
+    check(adlib_res[4][1] == "переломай мои кости х5", f"line 4 is x5: {adlib_res[4][1]!r}")
 
     print()
     if FAILURES:

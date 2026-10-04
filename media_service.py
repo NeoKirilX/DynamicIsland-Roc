@@ -8,6 +8,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -27,6 +28,7 @@ logger = logging.getLogger(__name__)
 COVER_CACHE_DIR = Path(tempfile.gettempdir()) / "dynamic_island_covers"
 
 TURN_DEGREES: float = 28.0
+MIN_MUSIC_DURATION: float = 30.0
 
 DEFAULT_PALETTE: list[tuple[float, float, float]] = [(1.0, 1.0, 1.0)]
 DEFAULT_ACCENT: tuple[float, float, float] = (1.0, 1.0, 1.0)
@@ -205,6 +207,67 @@ def resolve_desktop_friendly_name(desktop_entry: str, identity: str = "", bus_na
     }
     return known_map.get(bus_part.lower(), bus_part.capitalize() if bus_part else "Media Player")
 
+TRACK_TAGS_PATTERN = re.compile(
+    r"[\(\[]\s*(?:"
+    r"official\s+music\s+video|"
+    r"official\s+video|"
+    r"official\s+audio|"
+    r"visuali[sz]er|"
+    r"lyric\s+video|"
+    r"lyrics?|"
+    r"audio|"
+    r"sped\s*up|"
+    r"speed\s*up|"
+    r"spedup|"
+    r"slowed\s*[\+&]\s*reverb|"
+    r"slowed|"
+    r"официальное\s+видео|"
+    r"официальный\s+клип|"
+    r"премьера\s+трека|"
+    r"премьера\s+клипа|"
+    r"клип|"
+    r"аудио"
+    r")\s*[\)\]]",
+    re.IGNORECASE,
+)
+TRACK_JUNK_CHARS = " \t\r\n-–—―:()[]{}"
+
+def clean_track_title(raw_title: str) -> str:
+    if not raw_title:
+        return ""
+    cleaned = TRACK_TAGS_PATTERN.sub("", raw_title)
+    cleaned = re.sub(r"[\(\[]\s*[\)\]]", "", cleaned)
+    cleaned = re.sub(r"\s+", " ", cleaned)
+    cleaned = cleaned.strip(TRACK_JUNK_CHARS)
+    return cleaned
+
+def format_display_title(
+    title: str,
+    artist: Optional[str] = None,
+    capitalize_first: bool = True,
+) -> str:
+    songname = clean_track_title(title) if title else ""
+    if not songname:
+        return ""
+    if capitalize_first:
+        for idx, ch in enumerate(songname):
+            if ch.isalpha():
+                songname = songname[:idx] + ch.upper() + songname[idx + 1 :]
+                break
+    author = artist.strip() if artist else ""
+    if not author:
+        return songname
+    return f"{songname} — {author}"
+
+__all__ = [
+    "MediaService",
+    "PlayerSession",
+    "clean_track_title",
+    "format_display_title",
+    "extract_dominant_palette",
+    "resolve_desktop_friendly_name",
+]
+
 @dataclass
 class PlayerSession:
     bus_name: str
@@ -373,12 +436,19 @@ class MediaService:
     @property
     def available_players(self) -> list[str]:
         with self._lock:
-            return sorted(self._players.keys())
+            return sorted([
+                bname for bname, sess in self._players.items()
+                if not (0.0 < sess.duration < MIN_MUSIC_DURATION)
+            ])
 
     @property
     def has_track(self) -> bool:
         with self._lock:
-            return bool(self._current_player and self._title)
+            if not (self._current_player and self._title):
+                return False
+            if 0.0 < self._duration < MIN_MUSIC_DURATION:
+                return False
+            return True
 
     @property
     def last_playing(self) -> float:
@@ -548,7 +618,8 @@ class MediaService:
         with self._lock:
             session = self._players.get(name)
             if session and session.is_playing:
-                self._yield(name)
+                if not (0.0 < session.duration < MIN_MUSIC_DURATION):
+                    self._yield(name)
             elif not self._current_player:
                 self._pick_and_attach()
             self._notify_changed()
@@ -594,7 +665,8 @@ class MediaService:
                     if session.is_playing:
                         session.last_active = time.monotonic()
                         if not was_playing and bus_name != self._chosen:
-                            self._yield(bus_name)
+                            if not (0.0 < session.duration < MIN_MUSIC_DURATION):
+                                self._yield(bus_name)
                     needs_refresh = True
 
                 if "Rate" in changed_props:
@@ -647,9 +719,17 @@ class MediaService:
                 if "CanRaise" in changed_props:
                     session.can_raise = bool(changed_props["CanRaise"])
 
-            if needs_refresh and self._current_player == bus_name:
-                self._sync_current_from_session(session)
-                self._notify_changed()
+            if needs_refresh:
+                if self._current_player == bus_name:
+                    if 0.0 < session.duration < MIN_MUSIC_DURATION:
+                        self._pick_and_attach()
+                    else:
+                        self._sync_current_from_session(session)
+                    self._notify_changed()
+                elif session.is_playing and not (0.0 < session.duration < MIN_MUSIC_DURATION):
+                    if not self._current_player:
+                        self._pick_and_attach()
+                        self._notify_changed()
 
     def _on_seeked(
         self,
@@ -904,6 +984,9 @@ class MediaService:
             logger.debug("Async cover download failed for %s: %s", url, e)
 
     def _yield(self, playing_bus_name: str) -> None:
+        sess = self._players.get(playing_bus_name)
+        if sess and 0.0 < sess.duration < MIN_MUSIC_DURATION:
+            return
         if self._chosen != playing_bus_name:
             self._chosen = None
             self._attach_player(playing_bus_name)
@@ -911,18 +994,27 @@ class MediaService:
 
     def _pick_player(self) -> Optional[str]:
         if self._chosen and self._chosen in self._players:
-            return self._chosen
+            sess = self._players[self._chosen]
+            if not (0.0 < sess.duration < MIN_MUSIC_DURATION):
+                return self._chosen
         self._chosen = None
 
         for bname, sess in self._players.items():
             if sess.is_playing:
+                if 0.0 < sess.duration < MIN_MUSIC_DURATION:
+                    continue
                 return bname
 
         if self._players:
-            sorted_by_activity = sorted(
-                self._players.items(), key=lambda item: item[1].last_active, reverse=True
-            )
-            return sorted_by_activity[0][0]
+            valid_players = [
+                (b, s) for b, s in self._players.items()
+                if not (0.0 < s.duration < MIN_MUSIC_DURATION)
+            ]
+            if valid_players:
+                sorted_by_activity = sorted(
+                    valid_players, key=lambda item: item[1].last_active, reverse=True
+                )
+                return sorted_by_activity[0][0]
 
         return None
 

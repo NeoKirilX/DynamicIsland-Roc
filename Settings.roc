@@ -8,6 +8,7 @@ module [
     setScale,
     setGap,
     setClickLock,
+    setCapitalizeTitle,
 ]
 
 Settings : {
@@ -21,6 +22,7 @@ Settings : {
     scale : U64,
     gap : U64,
     autostart : Bool,
+    capitalizeTitle : Bool,
 }
 
 minScale : U64
@@ -52,6 +54,7 @@ defaultSettings = {
     scale: 100,
     gap: 8,
     autostart: Bool.false,
+    capitalizeTitle: Bool.true,
 }
 
 setLyrics : Settings, Bool -> Settings
@@ -74,6 +77,10 @@ setClickLock : Settings, Bool -> Settings
 setClickLock = |settings, clickLock|
     { settings & clickLock }
 
+setCapitalizeTitle : Settings, Bool -> Settings
+setCapitalizeTitle = |settings, capitalizeTitle|
+    { settings & capitalizeTitle }
+
 expect
     d = defaultSettings
     d.lyrics
@@ -94,6 +101,8 @@ expect
     == 8
     and d.autostart
     == Bool.false
+    and d.capitalizeTitle
+    == Bool.true
 
 expect
     clampScale 50
@@ -143,6 +152,7 @@ expect
         |> setRim Bool.false
         |> setScale 120
         |> setGap 12
+        |> setCapitalizeTitle Bool.false
     s.lyrics
     == Bool.false
     and s.rim
@@ -154,4 +164,6 @@ expect
     and s.network
     == Bool.true
     and s.autostart
+    == Bool.false
+    and s.capitalizeTitle
     == Bool.false

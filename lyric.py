@@ -209,7 +209,8 @@ class LyricLine:
         ext = cr.text_extents(text)
         text_w = ext.x_advance
 
-        if text_w <= max_w - 2.0 * fade_edge and offset_x == 0.0:
+        is_overflowing = (text_w > max_w - 2.0 * fade_edge) or (offset_x != 0.0)
+        if not is_overflowing:
             text_x = x + (max_w - text_w) / 2.0
         else:
             text_x = x + fade_edge + offset_x
@@ -228,6 +229,7 @@ class LyricLine:
         cr.set_source_rgba(r, g, b, a)
         cr.move_to(text_x, baseline)
         cr.show_text(text)
+        cr.new_path()
         text_group = cr.pop_group()
 
         cr.set_source(text_group)
@@ -241,22 +243,20 @@ class LyricLine:
             grad.add_color_stop_rgba(0.72, 1.0, 1.0, 1.0, a * (1.0 - (1.0 - unsung) * 0.45))
             grad.add_color_stop_rgba(1.0, 1.0, 1.0, 1.0, a * unsung)
             cr.mask(grad)
-            cr.restore()
-            return
-
-        fade = min(fade_edge, max_w * 0.45)
-        grad = cairo.LinearGradient(x, 0.0, x + max_w, 0.0)
-        if fade > 0.5:
-            grad.add_color_stop_rgba(0.0, 1.0, 1.0, 1.0, 0.0)
+        elif is_overflowing:
+            fade = min(16.0, max_w * 0.25)
+            grad = cairo.LinearGradient(x, 0.0, x + max_w, 0.0)
+            left_a = 0.0 if offset_x < -1.0 else a
+            grad.add_color_stop_rgba(0.0, 1.0, 1.0, 1.0, left_a)
             grad.add_color_stop_rgba(fade / max_w, 1.0, 1.0, 1.0, a)
+            remaining_right = (text_w + offset_x) - (max_w - 2.0 * fade_edge)
+            right_a = 0.0 if remaining_right > 1.0 else a
             grad.add_color_stop_rgba(1.0 - fade / max_w, 1.0, 1.0, 1.0, a)
-            grad.add_color_stop_rgba(1.0, 1.0, 1.0, 1.0, 0.0)
+            grad.add_color_stop_rgba(1.0, 1.0, 1.0, 1.0, right_a)
+            cr.mask(grad)
         else:
-            grad.add_color_stop_rgba(0.0, 1.0, 1.0, 1.0, a)
-            grad.add_color_stop_rgba(1.0, 1.0, 1.0, 1.0, a)
+            cr.paint()
 
-        cr.set_source(text_group)
-        cr.mask(grad)
         cr.restore()
 
     def render_karaoke(
@@ -299,6 +299,7 @@ class LyricLine:
 
         display_text = text if text.strip() else "♪"
         alpha: float = float(kwargs.get("alpha", 1.0))
+        vertical_fill: bool = bool(kwargs.get("vertical_fill", False))
 
         select_font(cr, font_size=font_size, bold=True)
         canonical_rows = layout_lines(cr, display_text, max_w=w, max_lines=MAX_LINES)
@@ -334,10 +335,47 @@ class LyricLine:
         line_h = font_size * (LINE_HEIGHT / FONT_SIZE)
         rows = canonical_rows
 
-        row_widths = [adv for _, adv in rows]
-        total_dist = sum(row_widths) + EDGE * len(rows)
+        total_h = len(rows) * line_h
+        start_y = y + max(0.0, (h - total_h) / 2.0) if h > 0.0 else y
+        ascent, descent, f_height = cr.font_extents()[:3]
 
         p = max(0.0, min(1.0, float(progress)))
+
+        if vertical_fill:
+            cr.save()
+            cr.rectangle(x, y, w, h if h > 0.0 else total_h)
+            cr.clip()
+
+            cr.push_group()
+            for i, (row_str, rw) in enumerate(rows):
+                row_y = start_y + i * line_h
+                baseline = row_y + ascent + max(0.0, (line_h - f_height) / 2.0)
+                row_x = x + max(0.0, (w - rw) / 2.0)
+                cr.set_source_rgba(1.0, 1.0, 1.0, alpha)
+                cr.move_to(row_x, baseline)
+                cr.show_text(row_str)
+                cr.new_path()
+            text_group = cr.pop_group()
+
+            cr.set_source(text_group)
+            if p <= 0.001:
+                cr.paint_with_alpha(unsung_opacity)
+            elif p >= 0.999:
+                cr.paint()
+            else:
+                fill_y = start_y + p * total_h
+                fade_h = 10.0
+                grad = cairo.LinearGradient(0.0, fill_y - fade_h, 0.0, fill_y + fade_h)
+                grad.add_color_stop_rgba(0.0, 1.0, 1.0, 1.0, 1.0)
+                grad.add_color_stop_rgba(0.35, 1.0, 1.0, 1.0, 1.0)
+                grad.add_color_stop_rgba(0.75, 1.0, 1.0, 1.0, unsung_opacity + (1.0 - unsung_opacity) * 0.35)
+                grad.add_color_stop_rgba(1.0, 1.0, 1.0, 1.0, unsung_opacity)
+                cr.mask(grad)
+            cr.restore()
+            return total_h
+
+        row_widths = [adv for _, adv in rows]
+        total_dist = sum(row_widths) + EDGE * len(rows)
         at = p * total_dist
 
         total_h = len(rows) * line_h
@@ -360,6 +398,7 @@ class LyricLine:
             cr.set_source_rgba(1.0, 1.0, 1.0, alpha)
             cr.move_to(row_x, baseline)
             cr.show_text(row_str)
+            cr.new_path()
             text_group = cr.pop_group()
 
             head = row_x + from_x

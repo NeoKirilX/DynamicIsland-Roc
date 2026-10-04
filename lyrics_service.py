@@ -35,6 +35,7 @@ class Candidate:
     duration: float
     end: float
     lines: list[tuple[float, str]]
+    synced: bool = True
 
 class LyricsService:
 
@@ -72,6 +73,13 @@ class LyricsService:
     def candidates(self) -> list[Candidate]:
         with self._lock:
             return list(self._candidates)
+
+    @property
+    def is_synced(self) -> bool:
+        with self._lock:
+            if not self._candidates:
+                return False
+            return getattr(self._candidates[0], "synced", True)
 
     @property
     def on_changed(self) -> Callable[[], None] | None:
@@ -291,7 +299,7 @@ class LyricsService:
         candidates: list[Candidate] = []
         seen: set[str] = set()
 
-        def add_candidate(dur: float, lrc_text: str) -> None:
+        def add_candidate(dur: float, lrc_text: str, synced: bool = True) -> None:
             lines = self.parse(lrc_text)
             if not lines:
                 return
@@ -303,7 +311,29 @@ class LyricsService:
             fingerprint = f"{dur:.1f}_{end:.1f}_{len(lines)}"
             if fingerprint not in seen:
                 seen.add(fingerprint)
-                candidates.append(Candidate(duration=dur, end=end, lines=lines))
+                candidates.append(Candidate(duration=dur, end=end, lines=lines, synced=synced))
+
+        def add_plain_candidate(dur: float, plain_text: str) -> None:
+            raw_lines = [
+                line.strip()
+                for line in plain_text.splitlines()
+                if line.strip() and not (line.strip().startswith("[") and line.strip().endswith("]"))
+            ]
+            if not raw_lines or dur <= 10.0:
+                return
+            intro_t = min(12.0, dur * 0.1)
+            avail_t = max(10.0, dur - intro_t - min(12.0, dur * 0.08))
+            step_t = avail_t / max(1, len(raw_lines))
+            timed_lines = []
+            cur_t = intro_t
+            for txt in raw_lines:
+                timed_lines.append((round(cur_t, 2), txt))
+                cur_t += step_t
+            end = timed_lines[-1][0] if timed_lines else dur
+            fingerprint = f"{dur:.1f}_{end:.1f}_{len(timed_lines)}_plain"
+            if fingerprint not in seen:
+                seen.add(fingerprint)
+                candidates.append(Candidate(duration=dur, end=end, lines=timed_lines, synced=False))
 
         if duration > 0.0:
             song = self.clean_title(title)
@@ -322,7 +352,9 @@ class LyricsService:
                         synced = data.get("syncedLyrics")
                         dur_val = data.get("duration")
                         if isinstance(synced, str) and isinstance(dur_val, (int, float)):
-                            add_candidate(float(dur_val), synced)
+                            add_candidate(float(dur_val), synced, synced=True)
+                        elif isinstance(data.get("plainLyrics"), str) and isinstance(dur_val, (int, float)):
+                            add_plain_candidate(float(dur_val), data["plainLyrics"])
                 except Exception:
                     pass
 
@@ -335,7 +367,9 @@ class LyricsService:
                     synced = item.get("syncedLyrics")
                     dur_val = item.get("duration")
                     if isinstance(synced, str) and isinstance(dur_val, (int, float)):
-                        add_candidate(float(dur_val), synced)
+                        add_candidate(float(dur_val), synced, synced=True)
+                    elif isinstance(item.get("plainLyrics"), str) and isinstance(dur_val, (int, float)):
+                        add_plain_candidate(float(dur_val), item["plainLyrics"])
             if candidates:
                 return candidates
 
@@ -441,7 +475,7 @@ class LyricsService:
         fp = f"{duration:.1f}_{end:.1f}_{len(timed_lines)}"
         if fp not in seen:
             seen.add(fp)
-            candidates.append(Candidate(duration=duration, end=end, lines=timed_lines))
+            candidates.append(Candidate(duration=duration, end=end, lines=timed_lines, synced=False))
 
     def _get_json(self, url: str, params: dict[str, str] | None = None) -> Any:
         for attempt in range(2):
