@@ -36,7 +36,7 @@ pyinstaller \
   "$SCRIPT_DIR/dynamic_island.py"
 
 cd "$DIST_DIR"
-tar -czf "$SCRIPT_DIR/$ARCHIVE_NAME" dynamic-island
+tar --use-compress-program="gzip -1" -cf "$SCRIPT_DIR/$ARCHIVE_NAME" dynamic-island
 
 echo "=== Build Complete! ==="
 echo "Archive: $SCRIPT_DIR/$ARCHIVE_NAME"

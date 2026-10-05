@@ -241,18 +241,16 @@ def format_time(seconds: float) -> str:
     return f"{mins}:{s:02d}"
 
 def clip_rounded_rect(
-    cr: cairo.Context, x: float, y: float, w: float, h: float, radius: float
+    cr: cairo.Context,
+    x: float,
+    y: float,
+    w: float,
+    h: float,
+    radius: float,
+    notch_factor: float = 0.0,
+    ear_size: float = 14.0,
 ) -> None:
-    r = max(0.0, min(radius, min(w, h) / 2.0))
-    if r <= 0.0:
-        cr.rectangle(x, y, w, h)
-    else:
-        cr.new_sub_path()
-        cr.arc(x + w - r, y + r, r, -math.pi / 2.0, 0.0)
-        cr.arc(x + w - r, y + h - r, r, 0.0, math.pi / 2.0)
-        cr.arc(x + r, y + h - r, r, math.pi / 2.0, math.pi)
-        cr.arc(x + r, y + r, r, math.pi, 3.0 * math.pi / 2.0)
-        cr.close_path()
+    Goo._add_rounded_rect_path(cr, x, y, w, h, radius, notch_factor=notch_factor, ear_size=ear_size)
     cr.clip()
 
 def draw_rounded_rect(
@@ -328,6 +326,38 @@ def markdown_to_pango_markup(text: str) -> str:
     escaped = re.sub(r"`(.+?)`", r"<tt>\1</tt>", escaped)
     escaped = re.sub(r"~~(.+?)~~", r"<s>\1</s>", escaped)
     return escaped
+
+def get_cache_size_str() -> str:
+    total_bytes = 0
+    from media_service import COVER_CACHE_DIR
+    from lyrics_service import LYRICS_CACHE_DIR
+    for d in (COVER_CACHE_DIR, LYRICS_CACHE_DIR):
+        if d.is_dir():
+            for p in d.rglob("*"):
+                if p.is_file():
+                    try:
+                        total_bytes += p.stat().st_size
+                    except Exception:
+                        pass
+    if total_bytes < 1024:
+        return "0 КБ"
+    elif total_bytes < 1024 * 1024:
+        return f"{total_bytes / 1024:.0f} КБ"
+    else:
+        return f"{total_bytes / (1024 * 1024):.1f} МБ"
+
+def clear_all_cache() -> None:
+    from media_service import COVER_CACHE_DIR
+    from lyrics_service import LYRICS_CACHE_DIR
+    for d in (COVER_CACHE_DIR, LYRICS_CACHE_DIR):
+        if d.is_dir():
+            for p in d.rglob("*"):
+                if p.is_file():
+                    try:
+                        p.unlink()
+                    except Exception:
+                        pass
+    _IMAGE_SURFACE_CACHE.clear()
 
 _IMAGE_SURFACE_CACHE: dict[str, tuple[cairo.ImageSurface, bytearray]] = {}
 _MEASURE_SURFACE = cairo.ImageSurface(cairo.FORMAT_ARGB32, 1, 1)
@@ -442,6 +472,8 @@ class MainWindow(Gtk.Window):
         self._row_list_look = RowList()
         self._row_list_text_anim = RowList()
         self._update_scroll = Spring(0.0, 240.0, 28.0)
+        self._notch = Spring(1.0 if Settings.notch else 0.0, 240.0, 22.0)
+        self._cache_feedback_until: float = 0.0
 
         self._preview_lines = [
             "♪ Музыка и текст",
@@ -1152,7 +1184,7 @@ class MainWindow(Gtk.Window):
         elif self._current_view == View.SETTINGS:
             row_y_start, row_h = self.get_settings_layout(ph)
             hovered = None
-            for idx in range(10):
+            for idx in range(11):
                 ry = py + row_y_start + idx * row_h
                 if px + 10 <= lx <= px + pw - 10 and ry <= ly < ry + row_h:
                     hovered = idx
@@ -1165,7 +1197,7 @@ class MainWindow(Gtk.Window):
         elif self._current_view == View.LOOK:
             row_y_start, row_h, swatch_y = self.get_look_layout(ph)
             hovered = None
-            for idx in range(13):
+            for idx in range(14):
                 ry = py + row_y_start + idx * row_h
                 if px + 10 <= lx <= px + pw - 10 and ry <= ly < ry + row_h:
                     hovered = idx
@@ -1455,7 +1487,15 @@ class MainWindow(Gtk.Window):
                     self.area.queue_draw()
                     return
 
-            upd_ry = py + row_y_start + 9 * row_h
+            cache_ry = py + row_y_start + 9 * row_h
+            if px <= lx <= px + pw and cache_ry <= ly < cache_ry + row_h:
+                clear_all_cache()
+                self._cache_feedback_until = time.monotonic() + 2.5
+                play_sound("charging")
+                self.area.queue_draw()
+                return
+
+            upd_ry = py + row_y_start + 10 * row_h
             if px <= lx <= px + pw and upd_ry <= ly < upd_ry + row_h:
                 self.open_panel(Panel.UPDATE)
                 self._updater.check_async()
@@ -1480,7 +1520,7 @@ class MainWindow(Gtk.Window):
             mod_step = self.get_modifier_step()
 
             if px <= lx <= px + pw:
-                for idx in range(13):
+                for idx in range(14):
                     ry = py + row_y_start + idx * row_h
                     if ry <= ly < ry + row_h:
                         if idx == 0:
@@ -1501,45 +1541,51 @@ class MainWindow(Gtk.Window):
                             self.set_align(new_align)
                             return
                         elif idx == 4:
+                            Settings.notch = not Settings.notch
+                            self._notch.target = 1.0 if Settings.notch else 0.0
+                            self.set_targets()
+                            self.area.queue_draw()
+                            return
+                        elif idx == 5:
                             self.open_panel(Panel.TEXT_ANIM)
                             self.update_view()
                             self.set_targets()
                             return
-                        elif idx == 5:
+                        elif idx == 6:
                             idx_r = RADII.index(Settings.radius) if Settings.radius in RADII else -1
                             new_radius = RADII[(idx_r + 1) % len(RADII)] if idx_r >= 0 else RADII[0]
                             self.set_radius(new_radius)
                             return
-                        elif idx == 6:
+                        elif idx == 7:
                             idx_h = HEIGHTS.index(Settings.height) if Settings.height in HEIGHTS else -1
                             new_h = HEIGHTS[(idx_h + 1) % len(HEIGHTS)] if idx_h >= 0 else HEIGHTS[0]
                             self.set_height(new_h)
                             return
-                        elif idx == 7:
+                        elif idx == 8:
                             idx_ts = TEXT_SCALES.index(Settings.text_scale) if Settings.text_scale in TEXT_SCALES else -1
                             new_ts = TEXT_SCALES[(idx_ts + 1) % len(TEXT_SCALES)] if idx_ts >= 0 else TEXT_SCALES[0]
                             self.set_text_scale(new_ts)
                             return
-                        elif idx == 8:
+                        elif idx == 9:
                             modes = [MATERIAL_LIQUID, MATERIAL_MATTE, MATERIAL_NONE]
                             cur_idx = modes.index(Settings.material) if Settings.material in modes else 0
                             new_mat = modes[(cur_idx + 1) % len(modes)]
                             self.set_material(new_mat)
                             return
-                        elif idx == 9:
+                        elif idx == 10:
                             idx_g = GLASS_LEVELS.index(Settings.glass) if Settings.glass in GLASS_LEVELS else -1
                             new_glass = GLASS_LEVELS[(idx_g + 1) % len(GLASS_LEVELS)] if idx_g >= 0 else GLASS_LEVELS[0]
                             self.set_glass(new_glass)
                             return
-                        elif idx == 10:
+                        elif idx == 11:
                             Settings.line_bar = not Settings.line_bar
                             self.area.queue_draw()
                             return
-                        elif idx == 11:
+                        elif idx == 12:
                             Settings.equalizer_dots = not Settings.equalizer_dots
                             self.area.queue_draw()
                             return
-                        elif idx == 12:
+                        elif idx == 13:
                             colors = [c[0] for c in LOOK_COLORS]
                             cur_idx = colors.index(Settings.accent) if Settings.accent in colors else 0
                             new_accent = colors[(cur_idx + 1) % len(colors)]
@@ -1737,42 +1783,48 @@ class MainWindow(Gtk.Window):
                 self.set_align(aligns[new_idx])
                 return True
             elif row_idx == 4:
+                Settings.notch = not Settings.notch
+                self._notch.target = 1.0 if Settings.notch else 0.0
+                self.set_targets()
+                self.area.queue_draw()
+                return True
+            elif row_idx == 5:
                 styles = [ANIM_STYLE_LETTERS, ANIM_STYLE_WAVE, ANIM_STYLE_BOUNCE, ANIM_STYLE_SLIDE]
                 cur = styles.index(Settings.lyric_anim_style) if Settings.lyric_anim_style in styles else 0
                 Settings.lyric_anim_style = styles[(cur + nudge) % len(styles)]
                 self.area.queue_draw()
                 return True
-            elif row_idx == 5:
+            elif row_idx == 6:
                 new_radius = max(0, min(100, Settings.radius + nudge * 5))
                 self.set_radius(new_radius)
                 return True
-            elif row_idx == 6:
+            elif row_idx == 7:
                 new_h = max(0, min(16, Settings.height + nudge))
                 self.set_height(new_h)
                 return True
-            elif row_idx == 7:
+            elif row_idx == 8:
                 new_ts = max(80, min(130, Settings.text_scale + nudge * 5))
                 self.set_text_scale(new_ts)
                 return True
-            elif row_idx == 8:
+            elif row_idx == 9:
                 modes = [MATERIAL_LIQUID, MATERIAL_MATTE, MATERIAL_NONE]
                 cur_idx = modes.index(Settings.material) if Settings.material in modes else 0
                 new_idx = max(0, min(len(modes) - 1, cur_idx - nudge))
                 self.set_material(modes[new_idx])
                 return True
-            elif row_idx == 9:
+            elif row_idx == 10:
                 new_glass = max(20, min(100, Settings.glass + nudge * 5))
                 self.set_glass(new_glass)
                 return True
-            elif row_idx == 10:
+            elif row_idx == 11:
                 Settings.line_bar = not Settings.line_bar
                 self.area.queue_draw()
                 return True
-            elif row_idx == 11:
+            elif row_idx == 12:
                 Settings.equalizer_dots = not Settings.equalizer_dots
                 self.area.queue_draw()
                 return True
-            elif row_idx == 12 or ly >= py + swatch_y - 15.0:
+            elif row_idx == 13 or ly >= py + swatch_y - 15.0:
                 colors = [c[0] for c in LOOK_COLORS]
                 cur_idx = colors.index(Settings.accent) if Settings.accent in colors else 0
                 new_idx = max(0, min(len(colors) - 1, cur_idx + nudge))
@@ -1923,14 +1975,14 @@ class MainWindow(Gtk.Window):
     def get_settings_layout(self, ph: float) -> tuple[float, float]:
         row_y_start = 44.0
         avail_for_rows = ph - row_y_start - 12.0
-        row_h = max(26.0, min(38.0, avail_for_rows / 10.0))
+        row_h = max(26.0, min(38.0, avail_for_rows / 11.0))
         return row_y_start, row_h
 
     def get_look_layout(self, ph: float) -> tuple[float, float, float]:
         row_y_start = 44.0
         avail_for_rows = ph - row_y_start - 48.0
-        row_h = max(24.0, min(36.0, avail_for_rows / 13.0))
-        swatch_y = row_y_start + 13.0 * row_h + 16.0
+        row_h = max(24.0, min(36.0, avail_for_rows / 14.0))
+        swatch_y = row_y_start + 14.0 * row_h + 16.0
         return row_y_start, row_h, swatch_y
 
     @property
@@ -1974,6 +2026,13 @@ class MainWindow(Gtk.Window):
         self._r.target = (d.r + pull * 0.3) * Settings.radius / 100.0
         self._lean.target = lean
         self._cover_scale.target = 0.85 if (self._current_view == View.MEDIA_BIG and not self._media.is_playing) else 1.0
+
+        if Settings.notch:
+            self._gap.target = 0.0
+            self._notch.target = 1.0
+        else:
+            self._gap.target = float(Settings.pos_y)
+            self._notch.target = 0.0
 
         timer = self._timer.active and self._current_view != View.TIMER
         shelf = len(self._shelf.items) > 0
@@ -2077,6 +2136,7 @@ class MainWindow(Gtk.Window):
         moving |= self._size.advance(dt)
         moving |= self._gap.advance(dt)
         moving |= self._pos_x.advance(dt)
+        moving |= self._notch.advance(dt)
         moving |= self._split.advance(dt)
         moving |= self._bubble_scale.advance(dt)
         moving |= self._push.advance(dt)
@@ -3179,21 +3239,31 @@ class MainWindow(Gtk.Window):
         cr.scale(size, size)
         cr.scale(scale, scale)
 
-        if h > 40.0:
-            shadow_alpha = min(0.6, (h - 40.0) / 60.0 * 0.5)
+        nf = self._notch.value
+        if h > 40.0 or nf > 0.01:
+            shadow_alpha = min(0.6, (h - 40.0) / 60.0 * 0.5) if h > 40.0 else 0.20 * nf
             cr.save()
-            draw_rounded_rect(cr, pill_x - 6, pill_y + 4, w + 12, h + 10, r + 4)
+            Goo._add_rounded_rect_path(
+                cr,
+                pill_x - 5,
+                pill_y,
+                w + 10,
+                h + 8,
+                r + 4,
+                notch_factor=nf,
+                ear_size=16.0,
+            )
             cr.set_source_rgba(0.0, 0.0, 0.0, shadow_alpha)
             cr.fill()
             cr.restore()
 
-        self._goo.shape(pill_rect, r, bubble_rect if apart else None)
+        self._goo.shape(pill_rect, r, bubble_rect if apart else None, notch_factor=nf, ear_size=14.0)
         self._goo.set_mode(Settings.material, 0.35)
         self._goo.set_glass(Settings.glass / 100.0)
         self._goo.render(cr, dt)
 
         cr.save()
-        clip_rounded_rect(cr, pill_x, pill_y, w, h, r)
+        clip_rounded_rect(cr, pill_x, pill_y, w, h, r, notch_factor=nf, ear_size=14.0)
 
         trans = self._view_transition
         prev = self._previous_view
@@ -4271,8 +4341,17 @@ class MainWindow(Gtk.Window):
             draw_text(cr, label, px + 49.0, ry + row_h / 2.0, font_size=13.0, bold=False, color=COLOR_WHITE, alpha=alpha, align="left", valign="center")
             self._toggles[key].render(cr, px + pw - 58.0, ry + (row_h - 24.0) / 2.0, w=46.0, h=24.0)
 
-        # Update row (index 9)
-        upd_ry = py + row_y_start + len(rows) * row_h
+        # Row 9: Clear cache
+        cache_ry = py + row_y_start + len(rows) * row_h
+        cache_cleared = time.monotonic() < self._cache_feedback_until
+        cache_str = "Очищено!" if cache_cleared else get_cache_size_str()
+        cache_color = COLOR_GREEN if cache_cleared else COLOR_DIM[:3]
+        render_icon(cr, Glyph.Tray, px + 22.0, cache_ry + (row_h - 17.0) / 2.0, 17.0, cache_color, alpha=alpha)
+        draw_text(cr, "Очистить кэш", px + 49.0, cache_ry + row_h / 2.0, font_size=13.0, bold=False, color=COLOR_WHITE, alpha=alpha, align="left", valign="center")
+        draw_text(cr, cache_str, px + pw - 24.0, cache_ry + row_h / 2.0, font_size=13.0, bold=False, color=cache_color, alpha=alpha, align="right", valign="center")
+
+        # Row 10: Update
+        upd_ry = py + row_y_start + (len(rows) + 1) * row_h
         render_icon(cr, Glyph.Sparkle, px + 22.0, upd_ry + (row_h - 17.0) / 2.0, 17.0, COLOR_ORANGE if self._updater.state == UpdateState.AVAILABLE else COLOR_DIM[:3], alpha=alpha)
         draw_text(cr, "Обновление", px + 49.0, upd_ry + row_h / 2.0, font_size=13.0, bold=False, color=COLOR_WHITE, alpha=alpha, align="left", valign="center")
         draw_text(cr, f"v{self._updater.latest_version}", px + pw - 38.0, upd_ry + row_h / 2.0, font_size=13.0, bold=False, color=COLOR_DIM[:3], alpha=alpha, align="right", valign="center")
@@ -4306,11 +4385,13 @@ class MainWindow(Gtk.Window):
             ALIGN_RIGHT: "Справа",
         }
         align_label = align_labels.get(Settings.align, "По центру")
+        shape_label = "Чёлка" if Settings.notch else "Пилюля"
         rows = [
             (Glyph.Size, "Размер", f"{Settings.scale}%"),
             (Glyph.Gap, "Позиция Y (Отступ)", f"{Settings.pos_y} px"),
             (Glyph.Size, "Позиция X (Смещение)", pos_x_str),
             (Glyph.Lines, "Выравнивание", align_label),
+            (Glyph.Look, "Форма острова", shape_label),
             (Glyph.Sparkle, "Анимация текста", "Настроить >"),
             (Glyph.Rim, "Радиус скругления", f"{Settings.radius}%"),
             (Glyph.Expand, "Высота острова", f"{Settings.height} px"),

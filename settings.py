@@ -218,6 +218,22 @@ class _SettingsMeta(type):
         cls.click_lock = value
 
     @property
+    def notch(cls) -> bool:
+        return cls._get_bool("notch", False)
+
+    @notch.setter
+    def notch(cls, value: bool) -> None:
+        cls._set("notch", bool(value))
+
+    @property
+    def Notch(cls) -> bool:
+        return cls.notch
+
+    @Notch.setter
+    def Notch(cls, value: bool) -> None:
+        cls.notch = value
+
+    @property
     def capitalize_title(cls) -> bool:
         return cls._get_bool("capitalize_title", True)
 

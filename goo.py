@@ -61,12 +61,16 @@ class Goo:
         self._glass_enabled_to: float = 1.0
         self._glass_enabled_elapsed: float = 1.0
         self._glass_enabled_duration: float = 0.35
+        self.notch_factor: float = 0.0
+        self.ear_size: float = 14.0
 
     def shape(
         self,
         pill: tuple[float, float, float, float],
         radius: float,
         bubble: tuple[float, float, float, float] | None = None,
+        notch_factor: float = 0.0,
+        ear_size: float = 14.0,
     ) -> None:
         self.pill = (
             float(pill[0]),
@@ -75,6 +79,8 @@ class Goo:
             float(pill[3]),
         )
         self.radius = float(radius)
+        self.notch_factor = float(notch_factor)
+        self.ear_size = float(ear_size)
         if bubble is not None:
             self.bubble = (
                 float(bubble[0]),
@@ -313,7 +319,7 @@ class Goo:
 
         if bubble_empty:
             cr.new_path()
-            self._add_rounded_rect_path(cr, px, py, pw, ph, pr)
+            self._add_rounded_rect_path(cr, px, py, pw, ph, pr, notch_factor=self.notch_factor, ear_size=self.ear_size)
             self._stroke_and_fill(cr)
             return
 
@@ -325,7 +331,7 @@ class Goo:
 
         if neck_info is None and not intersects:
             cr.new_path()
-            self._add_rounded_rect_path(cr, px, py, pw, ph, pr)
+            self._add_rounded_rect_path(cr, px, py, pw, ph, pr, notch_factor=self.notch_factor, ear_size=self.ear_size)
             self._stroke_and_fill(cr)
 
             cr.new_path()
@@ -342,7 +348,7 @@ class Goo:
             return
 
         cr.new_path()
-        self._add_rounded_rect_path(cr, px, py, pw, ph, pr)
+        self._add_rounded_rect_path(cr, px, py, pw, ph, pr, notch_factor=self.notch_factor, ear_size=self.ear_size)
         self._add_rounded_rect_path(cr, bx, by, bw, bh, br)
         self._stroke_and_fill(cr)
 
@@ -628,15 +634,44 @@ class Goo:
         w: float,
         h: float,
         r: float,
+        notch_factor: float = 0.0,
+        ear_size: float = 14.0,
     ) -> None:
         if w <= 0.0 or h <= 0.0:
             return
         r = min(r, w / 2.0, h / 2.0)
+        nf = max(0.0, min(1.0, float(notch_factor)))
+
+        if nf <= 0.01:
+            cr.new_sub_path()
+            cr.arc(x + w - r, y + r, r, -math.pi / 2.0, 0.0)
+            cr.arc(x + w - r, y + h - r, r, 0.0, math.pi / 2.0)
+            cr.arc(x + r, y + h - r, r, math.pi / 2.0, math.pi)
+            cr.arc(x + r, y + r, r, math.pi, 3.0 * math.pi / 2.0)
+            cr.close_path()
+            return
+
+        ear_w = ear_size * nf
+        ear_h = min(h * 0.45, ear_size * nf)
+
         cr.new_sub_path()
-        cr.arc(x + w - r, y + r, r, -math.pi / 2.0, 0.0)
-        cr.arc(x + w - r, y + h - r, r, 0.0, math.pi / 2.0)
-        cr.arc(x + r, y + h - r, r, math.pi / 2.0, math.pi)
-        cr.arc(x + r, y + r, r, math.pi, 3.0 * math.pi / 2.0)
+        cr.move_to(x - ear_w, y)
+        cr.curve_to(
+            x - ear_w * 0.45, y,
+            x, y + ear_h * 0.45,
+            x, y + ear_h,
+        )
+        cr.line_to(x, y + h - r)
+        cr.arc(x + r, y + h - r, r, math.pi, 0.5 * math.pi)
+        cr.line_to(x + w - r, y + h)
+        cr.arc(x + w - r, y + h - r, r, 0.5 * math.pi, 0.0)
+        cr.line_to(x + w, y + ear_h)
+        cr.curve_to(
+            x + w, y + ear_h * 0.45,
+            x + w + ear_w * 0.45, y,
+            x + w + ear_w, y,
+        )
+        cr.line_to(x - ear_w, y)
         cr.close_path()
 
 if __name__ == "__main__":
