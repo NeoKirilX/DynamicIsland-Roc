@@ -16,7 +16,7 @@ class Equalizer:
     CENTER: float = 0.5
     RISE: float = 0.8
     SINK: float = 2.5
-    SPREAD_DB: float = 12.0
+    SPREAD_DB: float = 24.0
     FLOOR_DB: float = -70.0
 
     F1: tuple[float, ...] = (7.1, 9.3, 6.2, 10.4, 8.0, 5.6, 9.9, 7.7)

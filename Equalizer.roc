@@ -29,7 +29,7 @@ center : F64
 center = 0.5
 
 spreadDb : F64
-spreadDb = 12.0
+spreadDb = 24.0
 
 f1 : List F64
 f1 = [7.1, 9.3, 6.2, 10.4, 8.0, 5.6, 9.9, 7.7]

@@ -22,7 +22,7 @@ class SpectrumAnalyzer:
 
     MIN_HZ: float = 45.0
     MAX_HZ: float = 14000.0
-    TILT_DB: float = 2.0
+    TILT_DB: float = 4.2
 
     def __init__(self, rate: int = 24000, size: int = 1024) -> None:
         self.rate: int = rate
