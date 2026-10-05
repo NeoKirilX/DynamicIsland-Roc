@@ -178,6 +178,38 @@ class _SettingsMeta(type):
         cls.capitalize_title = value
 
     @property
+    def line_bar(cls) -> bool:
+        return cls._get_bool("line_bar", False)
+
+    @line_bar.setter
+    def line_bar(cls, value: bool) -> None:
+        cls._set("line_bar", bool(value))
+
+    @property
+    def LineBar(cls) -> bool:
+        return cls.line_bar
+
+    @LineBar.setter
+    def LineBar(cls, value: bool) -> None:
+        cls.line_bar = value
+
+    @property
+    def equalizer_dots(cls) -> bool:
+        return cls._get_bool("equalizer_dots", False)
+
+    @equalizer_dots.setter
+    def equalizer_dots(cls, value: bool) -> None:
+        cls._set("equalizer_dots", bool(value))
+
+    @property
+    def EqualizerDots(cls) -> bool:
+        return cls.equalizer_dots
+
+    @EqualizerDots.setter
+    def EqualizerDots(cls, value: bool) -> None:
+        cls.equalizer_dots = value
+
+    @property
     def scale(cls) -> int:
         val = cls._get_int("scale", 100)
         return max(MIN_SCALE, min(MAX_SCALE, val))

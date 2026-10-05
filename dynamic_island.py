@@ -265,7 +265,7 @@ def main() -> int:
         "--view",
         type=str,
         default=None,
-        help="Force island view: Idle, Media, Timer, Volume, Charge, Focus, Toast, Notice, MediaBig, IdleBig, TimerBig, TimerSet, Menu, Settings, Look, Shelf",
+        help="Force island view: Idle, Media, Timer, Volume, Charge, Focus, Toast, Notice, MediaBig, IdleBig, TimerBig, TimerSet, Menu, Settings, Look, Shelf, Update",
     )
     parser.add_argument(
         "--timer",

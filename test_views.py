@@ -45,6 +45,7 @@ def test_views():
         "Settings",
         "Look",
         "Shelf",
+        "Update",
     ]
 
     def on_activate(application):
@@ -105,6 +106,12 @@ def test_views():
         assert win._panel == Panel.SHELF
         assert win._current_view == View.SHELF
         print("  Panel.SHELF opened successfully ->", win._current_view)
+
+        win.open_panel(Panel.UPDATE)
+        win.update_view()
+        assert win._panel == Panel.UPDATE
+        assert win._current_view == View.UPDATE
+        print("  Panel.UPDATE opened successfully ->", win._current_view)
 
         win.start_timer(60.0)
         assert win._timer.active

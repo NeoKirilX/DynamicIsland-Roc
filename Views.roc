@@ -31,6 +31,7 @@ View : [
     Settings,
     Look,
     Shelf,
+    Update,
 ]
 
 Panel : [
@@ -42,6 +43,7 @@ Panel : [
     Settings,
     Look,
     Shelf,
+    Update,
 ]
 
 Dims : {
@@ -68,6 +70,7 @@ allViews = [
     Settings,
     Look,
     Shelf,
+    Update,
 ]
 
 bubbleWidth : F64
@@ -99,6 +102,7 @@ viewToPanel = |view|
         Settings -> Settings
         Look -> Look
         Shelf -> Shelf
+        Update -> Update
         _ -> None
 
 panelToView : Panel -> View
@@ -111,6 +115,7 @@ panelToView = |panel|
         Settings -> Settings
         Look -> Look
         Shelf -> Shelf
+        Update -> Update
         None -> Idle
 
 dimsForView : View, Bool -> Dims
@@ -132,9 +137,10 @@ dimsForView = |view, hasLyrics|
         TimerBig -> { w: 330.0, h: 92.0, r: 40.0 }
         TimerSet -> { w: 300.0, h: 190.0, r: 38.0 }
         Menu -> { w: 300.0, h: 208.0, r: 34.0 }
-        Settings -> { w: 320.0, h: 414.0, r: 34.0 }
-        Look -> { w: 320.0, h: 460.0, r: 34.0 }
+        Settings -> { w: 320.0, h: 454.0, r: 34.0 }
+        Look -> { w: 320.0, h: 540.0, r: 34.0 }
         Shelf -> { w: 380.0, h: 136.0, r: 34.0 }
+        Update -> { w: 340.0, h: 230.0, r: 34.0 }
 
 resolveView : {
     panel : Panel,
@@ -149,6 +155,7 @@ resolveView = |{ panel, hasMedia, timerActive, isCharging, transientView }|
         Settings -> Settings
         Look -> Look
         Shelf -> Shelf
+        Update -> Update
         TimerSet -> TimerSet
         Timer if timerActive -> TimerBig
         Timer | Player if hasMedia -> MediaBig
@@ -167,7 +174,7 @@ resolveView = |{ panel, hasMedia, timerActive, isCharging, transientView }|
                 _ -> target
 
 expect
-    List.len allViews == 16
+    List.len allViews == 17
 
 expect
     dFocus = dimsForView Focus Bool.false
@@ -237,16 +244,23 @@ expect
     and Num.is_approx_eq dMenu.h 208.0 {}
     and Num.is_approx_eq dMenu.r 34.0 {}
     and Num.is_approx_eq dSettings.w 320.0 {}
-    and Num.is_approx_eq dSettings.h 414.0 {}
+    and Num.is_approx_eq dSettings.h 454.0 {}
     and Num.is_approx_eq dSettings.r 34.0 {}
     and Num.is_approx_eq dLook.w 320.0 {}
-    and Num.is_approx_eq dLook.h 460.0 {}
+    and Num.is_approx_eq dLook.h 540.0 {}
     and Num.is_approx_eq dLook.r 34.0 {}
+
+expect
+    dUpdate = dimsForView Update Bool.false
+    Num.is_approx_eq dUpdate.w 340.0 {}
+    and Num.is_approx_eq dUpdate.h 230.0 {}
+    and Num.is_approx_eq dUpdate.r 34.0 {}
 
 expect
     vMenu = resolveView { panel: Menu, hasMedia: Bool.false, timerActive: Bool.false, isCharging: Bool.false, transientView: None }
     vSettings = resolveView { panel: Settings, hasMedia: Bool.false, timerActive: Bool.false, isCharging: Bool.false, transientView: None }
     vLook = resolveView { panel: Look, hasMedia: Bool.false, timerActive: Bool.false, isCharging: Bool.false, transientView: None }
+    vUpdate = resolveView { panel: Update, hasMedia: Bool.false, timerActive: Bool.false, isCharging: Bool.false, transientView: None }
     vTimerSet = resolveView { panel: TimerSet, hasMedia: Bool.false, timerActive: Bool.false, isCharging: Bool.false, transientView: None }
     vTimerBig = resolveView { panel: Timer, hasMedia: Bool.false, timerActive: Bool.true, isCharging: Bool.false, transientView: None }
     vPlayerMedia = resolveView { panel: Player, hasMedia: Bool.true, timerActive: Bool.false, isCharging: Bool.false, transientView: None }
@@ -256,6 +270,7 @@ expect
     vMenu == Menu
     and vSettings == Settings
     and vLook == Look
+    and vUpdate == Update
     and vTimerSet == TimerSet
     and vTimerBig == TimerBig
     and vPlayerMedia == MediaBig

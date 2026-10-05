@@ -49,6 +49,9 @@ class Glyph(Enum):
     Moon = auto()
     Tray = auto()
     Cross = auto()
+    Pulse = auto()
+    Bolt = auto()
+    VpnOff = auto()
 
 @dataclass(frozen=True)
 class Art:
@@ -185,6 +188,17 @@ ARTS: dict[Glyph, Art] = {
     Glyph.Cross: Art(
         lines="M7.5,7.5 L16.5,16.5 M16.5,7.5 L7.5,16.5",
         line=2.6,
+    ),
+    Glyph.Pulse: Art(
+        lines="M3,12.5 H7.6 L10.2,6 L13.8,18.5 L16.2,12.5 H21",
+        line=2.2,
+    ),
+    Glyph.Bolt: Art(
+        "M13.6,3 L6.2,13.3 H11.3 L10.4,21 L17.8,10.7 H12.7 Z"
+    ),
+    Glyph.VpnOff: Art(
+        lines="M12,2.8 L19.6,5.6 V11.4 C19.6,16.2 16.4,19.6 12,21.4 C7.6,19.6 4.4,16.2 4.4,11.4 V5.6 Z M4,4 L20,20",
+        line=2.0,
     ),
 }
 

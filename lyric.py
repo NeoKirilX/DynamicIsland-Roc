@@ -5,6 +5,7 @@ import logging
 import math
 from pathlib import Path
 import tempfile
+import time
 from typing import Any, Optional
 
 import cairo
@@ -20,6 +21,57 @@ DIM: float = 0.4
 SCALE: float = 0.94
 UNSUNG_OPACITY: float = 0.6
 FADE_EDGE: float = 8.0
+
+DOT_COUNT: int = 3
+DOT_SIZE: float = 6.0
+DOT_GAP: float = 5.0
+DOT_BREATH_PERIOD: float = 1.8
+DOT_SWELL: float = 0.24
+DOT_FAINT: float = 1.75
+DOT_DYING: float = 0.3
+
+def is_wordless(text: str) -> bool:
+    clean = text.strip()
+    if not clean:
+        return True
+    return not any(c.isalnum() for c in clean)
+
+def draw_break_dots(
+    cr: cairo.Context,
+    cx: float,
+    cy: float,
+    progress: float = 0.0,
+    alpha: float = 1.0,
+    unsung_opacity: float = UNSUNG_OPACITY,
+    is_active: bool = True,
+    now: float | None = None,
+) -> float:
+    if now is None:
+        now = time.monotonic()
+
+    total_w = DOT_COUNT * DOT_SIZE + (DOT_COUNT - 1) * DOT_GAP
+    start_x = cx - total_w / 2.0
+
+    gone = max(0.0, min(1.0, 1.0 - DOT_FAINT * (1.0 - (1.0 if is_active else unsung_opacity))))
+    p = max(0.0, min(1.0, float(progress)))
+    left = (1.0 - p) * DOT_COUNT
+    breath = (1.0 - math.cos(now * 2.0 * math.pi / DOT_BREATH_PERIOD)) / 2.0
+    scale = 1.0 + DOT_SWELL * (1.0 - gone) * breath
+    r = (DOT_SIZE / 2.0) * scale
+
+    for i in range(DOT_COUNT):
+        op = gone + (1.0 - gone) * max(0.0, min(1.0, (left - i) / DOT_DYING))
+        dot_a = op * alpha
+        if dot_a <= 0.001:
+            continue
+        dot_x = start_x + i * (DOT_SIZE + DOT_GAP) + DOT_SIZE / 2.0
+        cr.save()
+        cr.set_source_rgba(1.0, 1.0, 1.0, dot_a)
+        cr.arc(dot_x, cy, r, 0.0, 2.0 * math.pi)
+        cr.fill()
+        cr.restore()
+
+    return LINE_HEIGHT if is_active else LINE_HEIGHT * SCALE
 
 _FONTS_REGISTERED: bool = False
 
@@ -115,6 +167,8 @@ def measure_text(
     is_active: bool = True,
 ) -> tuple[float, float]:
     eff_font = font_size if is_active else font_size * SCALE
+    if is_wordless(text):
+        return (DOT_COUNT * DOT_SIZE + (DOT_COUNT - 1) * DOT_GAP, eff_font * (LINE_HEIGHT / FONT_SIZE))
     select_font(cr, font_size=font_size, bold=True)
     canonical_rows = layout_lines(cr, text.strip() or "♪", max_w=max_w, max_lines=MAX_LINES)
     rows_count = max(1, len(canonical_rows))
@@ -202,6 +256,18 @@ class LyricLine:
         unsung: float = float(kwargs.get("unsung", DIM))
 
         if not text:
+            return
+
+        if is_wordless(text):
+            draw_break_dots(
+                cr,
+                x + max_w / 2.0,
+                y + h / 2.0,
+                progress=progress if progress is not None else 0.0,
+                alpha=alpha * dim,
+                unsung_opacity=unsung,
+                is_active=True,
+            )
             return
 
         select_font(cr, font_size=font_size, bold=True)
@@ -296,6 +362,17 @@ class LyricLine:
             h = float(rest[3]) if len(rest) > 3 else float(kwargs.get("h", 0.0))
             font_size = float(rest[4]) if len(rest) > 4 else float(kwargs.get("font_size", FONT_SIZE))
             is_active = bool(kwargs.get("is_active", True))
+
+        if is_wordless(text):
+            return draw_break_dots(
+                cr,
+                x + w / 2.0,
+                y + (h / 2.0 if h > 0.0 else LINE_HEIGHT / 2.0),
+                progress=progress,
+                alpha=alpha,
+                unsung_opacity=unsung_opacity,
+                is_active=is_active,
+            )
 
         display_text = text if text.strip() else "♪"
         alpha: float = float(kwargs.get("alpha", 1.0))
@@ -425,35 +502,15 @@ def render_wait(
     radius: float = 13.0,
     tint: tuple[float, float, float] = (1.0, 1.0, 1.0),
 ) -> None:
-    p = max(0.0, min(1.0, float(progress)))
-    cr.save()
-    cr.new_path()
-    cr.set_line_cap(cairo.LINE_CAP_ROUND)
-    cr.set_line_width(1.6)
-    cr.new_sub_path()
-    cr.arc(cx, cy, radius, 0.0, math.pi * 2.0)
-    cr.set_source_rgba(tint[0], tint[1], tint[2], 0.14 * alpha)
-    cr.stroke()
-
-    if p > 0.001:
-        cr.new_sub_path()
-        cr.arc(cx, cy, radius, -math.pi / 2.0, -math.pi / 2.0 + math.pi * 2.0 * p)
-        cr.set_source_rgba(tint[0], tint[1], tint[2], 0.5 * alpha)
-        cr.stroke()
-
-    r_dot = 2.6
-    gap = 7.0
-    beat = 0.5 + 0.5 * math.sin(now * 3.4)
-    for i in (-1, 0, 1):
-        phase = 0.5 + 0.5 * math.sin(now * 3.4 - i * 0.9)
-        dx = cx + i * gap
-        cr.new_sub_path()
-        cr.arc(dx, cy, r_dot * (0.72 + 0.28 * phase), 0.0, math.pi * 2.0)
-        cr.set_source_rgba(tint[0], tint[1], tint[2], (0.22 + 0.5 * phase) * alpha)
-        cr.fill()
-
-    cr.new_path()
-    cr.restore()
+    draw_break_dots(
+        cr,
+        cx,
+        cy,
+        progress=progress,
+        alpha=alpha,
+        now=now,
+        is_active=True,
+    )
 
 Lyric = LyricLine
 render_compact = LyricLine.render_compact

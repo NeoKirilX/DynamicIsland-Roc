@@ -9,6 +9,8 @@ module [
     setGap,
     setClickLock,
     setCapitalizeTitle,
+    setLineBar,
+    setEqualizerDots,
 ]
 
 Settings : {
@@ -23,6 +25,8 @@ Settings : {
     gap : U64,
     autostart : Bool,
     capitalizeTitle : Bool,
+    lineBar : Bool,
+    equalizerDots : Bool,
 }
 
 minScale : U64
@@ -55,11 +59,21 @@ defaultSettings = {
     gap: 8,
     autostart: Bool.false,
     capitalizeTitle: Bool.true,
+    lineBar: Bool.false,
+    equalizerDots: Bool.false,
 }
 
 setLyrics : Settings, Bool -> Settings
 setLyrics = |settings, lyrics|
     { settings & lyrics }
+
+setLineBar : Settings, Bool -> Settings
+setLineBar = |settings, lineBar|
+    { settings & lineBar }
+
+setEqualizerDots : Settings, Bool -> Settings
+setEqualizerDots = |settings, equalizerDots|
+    { settings & equalizerDots }
 
 setRim : Settings, Bool -> Settings
 setRim = |settings, rim|

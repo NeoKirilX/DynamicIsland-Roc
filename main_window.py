@@ -55,6 +55,9 @@ from spring import Spring
 from shimmer import Shimmer
 from timer_service import Countdown
 from toggle import Toggle
+from line_bar import LineBar
+from skip import Skip
+from updater import Updater, UpdateState
 
 try:
     from PIL import Image
@@ -78,6 +81,7 @@ class View(Enum):
     SETTINGS = auto()
     LOOK = auto()
     SHELF = auto()
+    UPDATE = auto()
 
 class Panel(Enum):
     NONE = auto()
@@ -88,6 +92,7 @@ class Panel(Enum):
     SETTINGS = auto()
     LOOK = auto()
     SHELF = auto()
+    UPDATE = auto()
 
 class Dims:
     __slots__ = ("w", "h", "r")
@@ -104,7 +109,7 @@ class Dims:
         return Dims(self.w, h, self.r)
 
 LOOK_WIDTH = 320.0
-LOOK_HEIGHT = 460.0
+LOOK_HEIGHT = 540.0
 COLOR_INDIGO: Tuple[float, float, float] = (0.49, 0.478, 1.0)
 CARRY_TIMER: float = 78.0
 CARRY_SHELF: float = 54.0
@@ -126,6 +131,7 @@ SIZES: dict[View, Dims] = {
     View.SETTINGS: Dims(320, 414, 34),
     View.LOOK: Dims(LOOK_WIDTH, LOOK_HEIGHT, 34),
     View.SHELF: Dims(380, 136, 34),
+    View.UPDATE: Dims(340, 230, 34),
 }
 
 SCALES: list[int] = [85, 100, 115, 130]
@@ -424,6 +430,31 @@ class MainWindow(Gtk.Window):
         self._gap.tune(240, 26)
         self._pos_x.tune(240, 26)
 
+        self._line_bar = LineBar()
+        self._skip_prev = Skip(back=True)
+        self._skip_next = Skip(back=False)
+        self._cover_scale = Spring(1.0)
+        self._cover_scale.tune(260, 13)
+        self._lean = Spring(0.0)
+        self._lean.tune(230, 15)
+
+        self._grab: str = "none"
+        self._grab_from: tuple[float, float] = (0.0, 0.0)
+        self._grab_last: tuple[float, float] = (0.0, 0.0)
+        self._grab_at: float = 0.0
+        self._grab_pace_x: float = 0.0
+        self._grab_pace_y: float = 0.0
+        self._pull_by: float = 0.0
+        self._lean_by: float = 0.0
+
+        self._alarm_start_time: float = 0.0
+        self._shake_x: float = 0.0
+        self._bell_angle: float = 0.0
+
+        self._updater = Updater.get()
+        self._updater.add_callback(lambda: GLib.idle_add(self.area.queue_draw))
+        self._btn_update_rect: tuple[float, float, float, float] = (0.0, 0.0, 0.0, 0.0)
+
         self._dragging_look: bool = False
         self._drag_start_x: float = 0.0
         self._drag_start_y: float = 0.0
@@ -491,6 +522,8 @@ class MainWindow(Gtk.Window):
         self._player_last_active: int = -1
         self._player_prev_active: int = -1
         self._player_active_spring = Spring(1.0, 160.0, 22.0)
+        self._player_row_waves: dict[int, Spring] = {}
+        self._player_row_dues: dict[int, float] = {}
         self._player_rows_cache: Optional[tuple[object, list[tuple[float, str, float, float, float]]]] = None
         self._compact_lines_cache: Optional[tuple[object, list[tuple[float, str]]]] = None
         self._lyric_scroll = 0.0
@@ -904,9 +937,36 @@ class MainWindow(Gtk.Window):
                 self._bubble_hover = False
                 self.set_targets()
 
+        if self._grab != "none":
+            now = time.monotonic()
+            dt = now - self._grab_at
+            if dt >= 0.004:
+                inst_vx = (lx - self._grab_last[0]) / dt
+                inst_vy = (ly - self._grab_last[1]) / dt
+                decay = 1.0 - math.exp(-dt / 0.03)
+                self._grab_pace_x += (inst_vx - self._grab_pace_x) * decay
+                self._grab_pace_y += (inst_vy - self._grab_pace_y) * decay
+                self._grab_last = (lx, ly)
+                self._grab_at = now
+
+            dx = lx - self._grab_from[0]
+            dy = ly - self._grab_from[1]
+            if self._grab == "held":
+                if abs(dx) >= 5.0 or abs(dy) >= 5.0:
+                    self._grab = "lean" if abs(dx) > abs(dy) else "pull"
+
+            if self._grab == "pull":
+                self._pull_by = max(0.0, dy)
+            elif self._grab == "lean":
+                self._lean_by = dx
+            self.set_targets()
+
         if self._scrubbing and self._seek_rect[2] > 0:
             rx, _, rw, _ = self._seek_rect
-            self._scrub = max(0.0, min(1.0, (lx - rx) / rw))
+            raw_x = lx - rx
+            if Settings.line_bar and self._media.duration >= 1.0 and self._lyrics_lines:
+                raw_x = self._line_bar.snap(raw_x, rw)
+            self._scrub = max(0.0, min(1.0, raw_x / rw))
             self.area.queue_draw()
 
         if self._current_view == View.MENU:
@@ -927,7 +987,7 @@ class MainWindow(Gtk.Window):
             row_y_start = py + 44.0
             row_h = 40.0
             hovered = None
-            for idx in range(9):
+            for idx in range(10):
                 ry = row_y_start + idx * row_h
                 if px + 10 <= lx <= px + pw - 10 and ry <= ly < ry + row_h:
                     hovered = idx
@@ -941,7 +1001,7 @@ class MainWindow(Gtk.Window):
             row_y_start = py + 44.0
             row_h = 40.0
             hovered = None
-            for idx in range(9):
+            for idx in range(11):
                 ry = row_y_start + idx * row_h
                 if px + 10 <= lx <= px + pw - 10 and ry <= ly < ry + row_h:
                     hovered = idx
@@ -1005,10 +1065,21 @@ class MainWindow(Gtk.Window):
                 rx, ry, rw, rh = self._seek_rect
                 if rx <= lx <= rx + rw and ry - 6 <= ly <= ry + rh + 6 and rw > 0 and self._media.duration > 1.0:
                     self._scrubbing = True
-                    self._scrub = max(0.0, min(1.0, (lx - rx) / rw))
+                    raw_x = lx - rx
+                    if Settings.line_bar and self._media.duration >= 1.0 and self._lyrics_lines:
+                        raw_x = self._line_bar.snap(raw_x, rw)
+                    self._scrub = max(0.0, min(1.0, raw_x / rw))
                     self._seek_x.tune(900, 60)
                     self.area.queue_draw()
                     return
+
+            if self._panel == Panel.NONE and not self._ringing:
+                self._grab = "held"
+                self._grab_from = (lx, ly)
+                self._grab_last = (lx, ly)
+                self._grab_at = time.monotonic()
+                self._grab_pace_x = 0.0
+                self._grab_pace_y = 0.0
 
             if self._current_view == View.MENU:
                 self._row_list_menu.set_pressed(True)
@@ -1074,6 +1145,53 @@ class MainWindow(Gtk.Window):
         self._row_list_settings.set_pressed(False)
         self._row_list_look.set_pressed(False)
 
+        if self._grab != "none":
+            grab = self._grab
+            pulled = self._pull_by
+            leant = self._lean_by
+            pace_x = self._grab_pace_x if (time.monotonic() - self._grab_at < 0.09) else 0.0
+            pace_y = self._grab_pace_y if (time.monotonic() - self._grab_at < 0.09) else 0.0
+
+            self._grab = "none"
+            self._pull_by = 0.0
+            self._lean_by = 0.0
+            self._lean.target = 0.0
+
+            if grab == "lean":
+                way = 0
+                if abs(leant) >= 12.0 and abs(pace_x) >= 550.0:
+                    way = int(math.copysign(1, pace_x))
+                elif abs(leant) >= 40.0:
+                    way = int(math.copysign(1, leant))
+
+                if way != 0 and self.media_active:
+                    if way < 0:
+                        self.skipped(1)
+                        self._skip_next.play()
+                        self._media.next()
+                    else:
+                        self.skipped(-1)
+                        self._skip_prev.play()
+                        self._media.previous()
+                self.set_targets()
+                return
+
+            if grab == "pull":
+                way_y = 0
+                if abs(pulled) >= 12.0 and abs(pace_y) >= 550.0:
+                    way_y = 1
+                elif abs(pulled) >= 42.0:
+                    way_y = 1
+
+                if way_y <= 0:
+                    self.set_targets()
+                    return
+
+                self.open_panel(Panel.PLAYER if (self.media_active or not self._timer.active) else Panel.TIMER)
+                self.update_view()
+                self.set_targets()
+                return
+
         if not self._pressed:
             return
         self._pressed = False
@@ -1089,6 +1207,7 @@ class MainWindow(Gtk.Window):
             bx, by, bw, bh = self._btn_prev_rect
             if bx <= lx <= bx + bw and by <= ly <= by + bh:
                 self.skipped(-1)
+                self._skip_prev.play()
                 self._media.previous()
                 return
 
@@ -1100,6 +1219,7 @@ class MainWindow(Gtk.Window):
             bx, by, bw, bh = self._btn_next_rect
             if bx <= lx <= bx + bw and by <= ly <= by + bh:
                 self.skipped(1)
+                self._skip_next.play()
                 self._media.next()
                 return
 
@@ -1201,6 +1321,13 @@ class MainWindow(Gtk.Window):
                     self.area.queue_draw()
                     return
 
+            if px <= lx <= px + pw and row_y_start + 9 * row_h <= ly < row_y_start + 10 * row_h:
+                self.open_panel(Panel.UPDATE)
+                self._updater.check_async()
+                self.update_view()
+                self.set_targets()
+                return
+
         if self._current_view == View.LOOK:
             if self._dragging_look:
                 did_drag = abs(x - self._drag_start_x) >= 4 or abs(y - self._drag_start_y) >= 4
@@ -1265,19 +1392,46 @@ class MainWindow(Gtk.Window):
                     return
 
                 if row_y_start + 8 * row_h <= ly < row_y_start + 9 * row_h:
+                    Settings.line_bar = not Settings.line_bar
+                    self.area.queue_draw()
+                    return
+
+                if row_y_start + 9 * row_h <= ly < row_y_start + 10 * row_h:
+                    Settings.equalizer_dots = not Settings.equalizer_dots
+                    self.area.queue_draw()
+                    return
+
+                if row_y_start + 10 * row_h <= ly < row_y_start + 11 * row_h:
                     colors = [c[0] for c in LOOK_COLORS]
                     cur_idx = colors.index(Settings.accent) if Settings.accent in colors else 0
                     new_accent = colors[(cur_idx + 1) % len(colors)]
                     self.set_accent(new_accent)
                     return
 
-            swatch_y = row_y_start + 9 * row_h + 18.0
+            swatch_y = row_y_start + 11 * row_h + 18.0
             step_x = (pw - 20.0) / len(LOOK_COLORS)
             if swatch_y - 15.0 <= ly <= swatch_y + 15.0 and px <= lx <= px + pw:
                 idx = int((lx - (px + 10.0)) / step_x)
                 if 0 <= idx < len(LOOK_COLORS):
                     self.set_accent(LOOK_COLORS[idx][0])
                     return
+
+        if self._current_view == View.UPDATE:
+            if px + 10 <= lx <= px + 150 and py + 12 <= ly <= py + 40:
+                self.open_panel(Panel.SETTINGS)
+                self.update_view()
+                self.set_targets()
+                return
+
+            bx, by, bw, bh = self._btn_update_rect
+            if bx <= lx <= bx + bw and by <= ly <= by + bh:
+                if self._updater.state == UpdateState.READY:
+                    self._updater.restart()
+                elif self._updater.state == UpdateState.AVAILABLE:
+                    self._updater.start_download_async()
+                else:
+                    self._updater.check_async(force=True)
+                return
 
         if self._current_view == View.SHELF:
             if px + 10 <= lx <= px + 100 and py + 12 <= ly <= py + 40:
@@ -1455,6 +1609,8 @@ class MainWindow(Gtk.Window):
                 target = View.LOOK
             elif self._panel == Panel.SHELF:
                 target = View.SHELF
+            elif self._panel == Panel.UPDATE:
+                target = View.UPDATE
             elif self._panel == Panel.TIMER_SET:
                 target = View.TIMER_SET
             elif self._panel == Panel.TIMER and self._timer.active:
@@ -1515,9 +1671,18 @@ class MainWindow(Gtk.Window):
     def set_targets(self) -> None:
         d = self.size_of(self._current_view)
         compact = d.h < 40.0
-        self._w.target = d.w
-        self._h.target = d.h + Settings.height
-        self._r.target = d.r * Settings.radius / 100.0
+
+        pull = (self._pull_by * 96.0) / (self._pull_by + 96.0) if (self._pull_by + 96.0) > 0 else 0.0
+        abs_lean = abs(self._lean_by)
+        lean_rubber = (abs_lean * 44.0) / (abs_lean + 44.0) if (abs_lean + 44.0) > 0 else 0.0
+        lean = math.copysign(lean_rubber, self._lean_by) if self._lean_by != 0 else 0.0
+        taken = self._grab in ("pull", "lean")
+
+        self._w.target = d.w + pull * 0.4 + abs(lean) * 0.6
+        self._h.target = d.h + pull + Settings.height
+        self._r.target = (d.r + pull * 0.3) * Settings.radius / 100.0
+        self._lean.target = lean
+        self._cover_scale.target = 0.85 if (self._current_view == View.MEDIA_BIG and not self._media.is_playing) else 1.0
 
         timer = self._timer.active and self._current_view != View.TIMER
         shelf = len(self._shelf.items) > 0
@@ -1534,9 +1699,9 @@ class MainWindow(Gtk.Window):
             self._offset.target = 0.0
 
         self._scale.target = (
-            (0.93 if compact else 0.975)
+            1.0 if taken else ((0.93 if compact else 0.975)
             if self._pressed
-            else (1.07 if (self._hover and compact) else 1.0)
+            else (1.07 if (self._hover and compact) else 1.0))
         )
         self._bubble_scale.target = (
             0.93 if self._bubble_pressed else (1.07 if self._bubble_hover else 1.0)
@@ -1630,10 +1795,44 @@ class MainWindow(Gtk.Window):
         moving |= self._shelf_wide.advance(dt)
         moving |= self._focus_swing.advance(dt)
         moving |= self._focus_scale.advance(dt)
+        moving |= self._lean.advance(dt)
+        moving |= self._cover_scale.advance(dt)
+        moving |= self._skip_prev.advance(dt)
+        moving |= self._skip_next.advance(dt)
         moving |= self._shelf.tick(dt)
         moving |= self._digits_shelf.tick(dt)
         moving |= self._digits_shelf_menu.tick(dt)
         self._poll_quiet(now)
+
+        if self._ringing:
+            moving = True
+            ring_t = (now - self._alarm_start_time) % 1.5
+            if ring_t < 0.8:
+                st = ring_t / 0.8
+                angles = [24.0, -22.0, 17.0, -13.0, 8.0, -4.0, 0.0]
+                idx_f = st * (len(angles) - 1)
+                idx_i = int(idx_f)
+                frac = idx_f - idx_i
+                a0 = angles[idx_i]
+                a1 = angles[min(len(angles) - 1, idx_i + 1)]
+                self._bell_angle = a0 + (a1 - a0) * frac
+            else:
+                self._bell_angle = 0.0
+
+            if ring_t < 0.56:
+                st = ring_t / 0.56
+                shakes = [-3.5, 3.5, -3.0, 3.0, -2.0, 1.5, -1.0, 0.0]
+                idx_f = st * (len(shakes) - 1)
+                idx_i = int(idx_f)
+                frac = idx_f - idx_i
+                s0 = shakes[idx_i]
+                s1 = shakes[min(len(shakes) - 1, idx_i + 1)]
+                self._shake_x = s0 + (s1 - s0) * frac
+            else:
+                self._shake_x = 0.0
+        else:
+            self._shake_x = 0.0
+            self._bell_angle = 0.0
 
         if self._current_view == View.MEDIA_BIG or self._scrubbing:
             dur = self._media.duration
@@ -1653,6 +1852,13 @@ class MainWindow(Gtk.Window):
             moving |= self._player_col.advance(dt)
             moving |= self._player_active_spring.advance(dt)
             moving |= self._shimmer.tick(dt)
+            for i, due in list(self._player_row_dues.items()):
+                if now >= due:
+                    del self._player_row_dues[i]
+                    if i in self._player_row_waves:
+                        self._player_row_waves[i].target = self._player_col.target
+            for sp in self._player_row_waves.values():
+                moving |= sp.advance(dt)
 
         if self._current_view == View.MEDIA and self._lyric_overflow > 0.0 and Settings.lyrics:
             moving |= self._advance_lyric_scroll(dt)
@@ -2361,6 +2567,7 @@ class MainWindow(Gtk.Window):
         total_span = format_time(self._timer.total)
         self.stop_timer()
         self._ringing = True
+        self._alarm_start_time = time.monotonic()
         self._alarm.ring()
         self.notify(Glyph.Bell, COLOR_ORANGE, "Таймер", f"Время вышло · {total_span}", seconds=3.5, force=True)
         self.set_targets()
@@ -2369,6 +2576,8 @@ class MainWindow(Gtk.Window):
         if not self._ringing:
             return
         self._ringing = False
+        self._shake_x = 0.0
+        self._bell_angle = 0.0
         self._alarm.stop()
 
     def set_minutes(self, minutes: int) -> None:
@@ -2492,7 +2701,7 @@ class MainWindow(Gtk.Window):
         h = max(24.0, self._h.value + Settings.height)
         r = min(w / 2.0, min(h / 2.0, max(0.0, self._r.value * Settings.radius / 100.0)))
 
-        cx = width / 2.0 + self._pos_x.value
+        cx = width / 2.0 + self._pos_x.value + self._lean.value + self._shake_x
         offset_y = self._offset.value + self._gap.value / size
         pill_top = offset_y * size
 
@@ -2682,6 +2891,8 @@ class MainWindow(Gtk.Window):
             self.render_look(cr, px, py, pw, ph, alpha)
         elif view == View.SHELF:
             self.render_shelf(cr, px, py, pw, ph, alpha)
+        elif view == View.UPDATE:
+            self.render_update(cr, px, py, pw, ph, alpha)
 
     def render_idle(self, cr: cairo.Context, px: float, py: float, pw: float, ph: float, alpha: float) -> None:
         draw_text(
@@ -2926,17 +3137,24 @@ class MainWindow(Gtk.Window):
         cr.set_source_rgba(1.0, 1.0, 1.0, 0.12 * alpha)
         cr.fill()
 
-        pulse_scale = 1.0 + (0.2 * math.sin(time.monotonic() * 8.0) if self._ringing else 0.0)
-        icon_size = 22.0 * pulse_scale
+        icon_cx = badge_x + badge_size / 2.0
+        icon_cy = badge_y + badge_size / 2.0
+        icon_size = 22.0
+        cr.save()
+        if self._ringing and self._notice_icon == Glyph.Bell:
+            cr.translate(icon_cx, icon_cy - 8.0)
+            cr.rotate(math.radians(self._bell_angle))
+            cr.translate(-icon_cx, -(icon_cy - 8.0))
         render_icon(
             cr,
             self._notice_icon,
-            badge_x + (badge_size - icon_size) / 2.0,
-            badge_y + (badge_size - icon_size) / 2.0,
+            icon_cx - icon_size / 2.0,
+            icon_cy - icon_size / 2.0,
             icon_size,
             self._notice_tint,
             alpha=alpha,
         )
+        cr.restore()
 
         mid_x = badge_x + badge_size + 12.0
         mid_w = pw - (mid_x - px) - 16.0
@@ -3057,10 +3275,25 @@ class MainWindow(Gtk.Window):
                 self._player_col.tune(120, 24)
 
             if active != self._player_last_active:
-                self._player_prev_active = self._player_last_active
+                was = self._player_last_active
+                self._player_prev_active = was
                 self._player_last_active = active
                 self._player_active_spring.value = 0.0
                 self._player_active_spring.target = 1.0
+
+                up = target_y <= self._player_col.value
+                lead = active + (-1 if up else 1)
+                now_s = time.monotonic()
+                for idx in range(len(rows)):
+                    if abs(idx - active) > 4 and abs(idx - max(0, was)) > 4:
+                        if idx in self._player_row_waves:
+                            self._player_row_waves[idx].value = target_y
+                            self._player_row_waves[idx].target = target_y
+                        continue
+                    behind = max(0, min(5, (idx - lead) if up else (lead - idx)))
+                    self._player_row_dues[idx] = now_s + behind * 0.04
+                    if idx not in self._player_row_waves:
+                        self._player_row_waves[idx] = Spring(self._player_col.value, 120, 24)
 
         col_y = self._player_col.value
         margin = max(WAIT_ROW_H, 32.0)
@@ -3096,7 +3329,8 @@ class MainWindow(Gtk.Window):
 
         try:
             for i, (line_t, line_text, h_a, h_d, row_top) in enumerate(rows):
-                y = lyric_y + col_y + row_top
+                wave_y = self._player_row_waves[i].value if i in self._player_row_waves else col_y
+                y = lyric_y + wave_y + row_top
                 if y + max(h_a, h_d) < top_limit or y > bottom_limit:
                     continue
 
@@ -3160,26 +3394,28 @@ class MainWindow(Gtk.Window):
         return max(0.0, min(1.0, 1.0 - (next_t - at) / 6.0))
 
     def render_media_big(self, cr: cairo.Context, px: float, py: float, pw: float, ph: float, alpha: float) -> None:
-        art_size = 64.0
-        art_x = px + 20.0
-        art_y = py + 20.0
-        self._btn_art_rect = (art_x, art_y, art_size, art_size)
+        cover_scale = max(0.5, min(1.0, self._cover_scale.value))
+        art_size = 64.0 * cover_scale
+        art_back = (64.0 - art_size) / 2.0
+        art_x = px + 20.0 + art_back
+        art_y = py + 20.0 + art_back
+        self._btn_art_rect = (px + 20.0, py + 20.0, 64.0, 64.0)
 
         if self._cover_big.surface:
-            self._cover_big.render(cr, art_x, art_y, art_size, radius=16.0)
+            self._cover_big.render(cr, art_x, art_y, art_size, radius=16.0 * cover_scale)
         else:
-            draw_rounded_rect(cr, art_x, art_y, art_size, art_size, 16.0)
+            draw_rounded_rect(cr, art_x, art_y, art_size, art_size, 16.0 * cover_scale)
             cr.set_source_rgba(0.2, 0.2, 0.2, alpha)
             cr.fill()
-            render_icon(cr, Glyph.Note, art_x + 17.0, art_y + 17.0, 30.0, COLOR_DIM[:3], alpha=alpha)
+            render_icon(cr, Glyph.Note, art_x + 17.0 * cover_scale, art_y + 17.0 * cover_scale, 30.0 * cover_scale, COLOR_DIM[:3], alpha=alpha)
 
         eq_w = 38.0
         eq_h = 26.0
         eq_x = px + pw - 22.0 - eq_w
         eq_y = py + 38.0
-        self._eq_big.render(cr, eq_x, eq_y, eq_w, eq_h, color=self._accent_color, alpha=alpha)
+        self._eq_big.render(cr, eq_x, eq_y, eq_w, eq_h, color=self._accent_color, alpha=alpha, dots=Settings.equalizer_dots)
 
-        mid_x = art_x + art_size + 14.0
+        mid_x = px + 20.0 + 64.0 + 14.0
         mid_w = eq_x - mid_x - 12.0
         draw_text(
             cr,
@@ -3223,15 +3459,22 @@ class MainWindow(Gtk.Window):
         seek_h = max(2.0, self._seek_h.value)
         self._seek_rect = (seek_x, seek_y - seek_h / 2.0, seek_w, seek_h)
 
-        draw_rounded_rect(cr, seek_x, seek_y - seek_h / 2.0, seek_w, seek_h, seek_h / 2.0)
-        cr.set_source_rgba(1.0, 1.0, 1.0, 0.2 * alpha)
-        cr.fill()
-
-        fill_seek = max(0.0, min(seek_w, self._seek_x.value))
-        if fill_seek > 1.0:
-            draw_rounded_rect(cr, seek_x, seek_y - seek_h / 2.0, fill_seek, seek_h, seek_h / 2.0)
-            cr.set_source_rgba(1.0, 1.0, 1.0, alpha)
+        if Settings.line_bar and known_dur and self._lyrics_lines:
+            starts = [t / dur for t, _ in self._lyrics_lines if 0.0 <= t <= dur]
+            self._line_bar.set_starts(starts)
+            prog = self._seek_x.value / seek_w
+            accent = self._accent_color or COLOR_WHITE[:3]
+            self._line_bar.render(cr, seek_x, seek_y - seek_h / 2.0, seek_w, seek_h, prog, accent, alpha=alpha)
+        else:
+            draw_rounded_rect(cr, seek_x, seek_y - seek_h / 2.0, seek_w, seek_h, seek_h / 2.0)
+            cr.set_source_rgba(1.0, 1.0, 1.0, 0.2 * alpha)
             cr.fill()
+
+            fill_seek = max(0.0, min(seek_w, self._seek_x.value))
+            if fill_seek > 1.0:
+                draw_rounded_rect(cr, seek_x, seek_y - seek_h / 2.0, fill_seek, seek_h, seek_h / 2.0)
+                cr.set_source_rgba(1.0, 1.0, 1.0, alpha)
+                cr.fill()
 
         rem = max(0.0, dur - pos) if known_dur else 0.0
         draw_text(cr, f"-{format_time(rem)}" if known_dur else "-0:00", px + pw - 20.0, seek_y + 3.0, font_size=11.0, color=COLOR_DIM[:3], alpha=alpha, align="right", valign="center")
@@ -3239,20 +3482,7 @@ class MainWindow(Gtk.Window):
         btn_y = py + ph - 42.0
 
         self._btn_prev_rect = (px + pw / 2.0 - 74.0, btn_y - 20.0, 40.0, 40.0)
-        cr.save()
-        cr.translate(px + pw / 2.0 - 54.0, btn_y)
-        cr.new_path()
-        cr.move_to(-2.0, -8.0)
-        cr.line_to(-12.0, 0.0)
-        cr.line_to(-2.0, 8.0)
-        cr.close_path()
-        cr.move_to(8.0, -8.0)
-        cr.line_to(-2.0, 0.0)
-        cr.line_to(8.0, 8.0)
-        cr.close_path()
-        cr.set_source_rgba(1.0, 1.0, 1.0, alpha)
-        cr.fill()
-        cr.restore()
+        self._skip_prev.render(cr, px + pw / 2.0 - 54.0, btn_y, color=COLOR_WHITE, alpha=alpha)
 
         self._btn_play_rect = (px + pw / 2.0 - 24.0, btn_y - 24.0, 48.0, 48.0)
         cr.save()
@@ -3273,20 +3503,7 @@ class MainWindow(Gtk.Window):
         cr.restore()
 
         self._btn_next_rect = (px + pw / 2.0 + 34.0, btn_y - 20.0, 40.0, 40.0)
-        cr.save()
-        cr.translate(px + pw / 2.0 + 54.0, btn_y)
-        cr.new_path()
-        cr.move_to(-8.0, -8.0)
-        cr.line_to(2.0, 0.0)
-        cr.line_to(-8.0, 8.0)
-        cr.close_path()
-        cr.move_to(2.0, -8.0)
-        cr.line_to(12.0, 0.0)
-        cr.line_to(2.0, 8.0)
-        cr.close_path()
-        cr.set_source_rgba(1.0, 1.0, 1.0, alpha)
-        cr.fill()
-        cr.restore()
+        self._skip_next.render(cr, px + pw / 2.0 + 54.0, btn_y, color=COLOR_WHITE, alpha=alpha)
 
         if self._headset_pct >= 0:
             render_icon(cr, Glyph.Headphones, px + pw - 60.0, btn_y - 7.0, 14.0, COLOR_DIM[:3], alpha=alpha)
@@ -3442,6 +3659,20 @@ class MainWindow(Gtk.Window):
         cr.arc(p_cx, p_cy, 25.0, 0, 2 * math.pi)
         cr.set_source_rgba(COLOR_ORANGE[0], COLOR_ORANGE[1], COLOR_ORANGE[2], 0.25 * alpha)
         cr.fill()
+
+        if self._timer.total > 0:
+            frac = max(0.0, min(1.0, self._timer.remaining / float(self._timer.total)))
+            cr.save()
+            cr.set_line_width(2.5)
+            cr.set_line_cap(cairo.LINE_CAP_ROUND)
+            cr.arc(p_cx, p_cy, 27.5, 0, 2 * math.pi)
+            cr.set_source_rgba(COLOR_ORANGE[0], COLOR_ORANGE[1], COLOR_ORANGE[2], 0.15 * alpha)
+            cr.stroke()
+            if frac > 0.001:
+                cr.arc(p_cx, p_cy, 27.5, -math.pi / 2.0, -math.pi / 2.0 + 2 * math.pi * frac)
+                cr.set_source_rgba(self._timer_tint[0], self._timer_tint[1], self._timer_tint[2], 0.9 * alpha)
+                cr.stroke()
+            cr.restore()
         if self._timer.running:
             cr.rectangle(p_cx - 5.0, p_cy - 7.0, 3.5, 14.0)
             cr.rectangle(p_cx + 1.5, p_cy - 7.0, 3.5, 14.0)
@@ -3548,6 +3779,13 @@ class MainWindow(Gtk.Window):
             draw_text(cr, label, px + 49.0, ry + 20.0, font_size=13.5, bold=False, color=COLOR_WHITE, alpha=alpha, align="left", valign="center")
             self._toggles[key].render(cr, px + pw - 50.0, ry + 10.0, w=38.0, h=22.0)
 
+        # Update row (index 9)
+        upd_ry = row_y_start + len(rows) * row_h
+        render_icon(cr, Glyph.Sparkle, px + 22.0, upd_ry + 11.5, 17.0, COLOR_ORANGE if self._updater.state == UpdateState.AVAILABLE else COLOR_DIM[:3], alpha=alpha)
+        draw_text(cr, "Обновление", px + 49.0, upd_ry + 20.0, font_size=13.5, bold=False, color=COLOR_WHITE, alpha=alpha, align="left", valign="center")
+        draw_text(cr, f"v{self._updater.latest_version}", px + pw - 38.0, upd_ry + 20.0, font_size=13.0, bold=False, color=COLOR_DIM[:3], alpha=alpha, align="right", valign="center")
+        render_icon(cr, Glyph.Chevron, px + pw - 26.0, upd_ry + 14.5, 11.0, COLOR_DIM[:3], alpha=alpha)
+
     def render_look(self, cr: cairo.Context, px: float, py: float, pw: float, ph: float, alpha: float) -> None:
         render_icon(cr, Glyph.Back, px + 20.0, py + 18.0, 10.0, COLOR_DIM[:3], alpha=0.6 * alpha)
         draw_text(cr, "ОФОРМЛЕНИЕ", px + 36.0, py + 23.0, font_size=10.5, bold=True, color=COLOR_DIM[:3], alpha=0.6 * alpha, align="left", valign="center")
@@ -3568,6 +3806,8 @@ class MainWindow(Gtk.Window):
             material_label = "Отключено"
 
         pos_x_str = f"+{Settings.pos_x} px" if Settings.pos_x > 0 else f"{Settings.pos_x} px"
+        seek_style_label = "По строкам" if Settings.line_bar else "Сплошная"
+        eq_style_label = "Матрица" if Settings.equalizer_dots else "Полоски"
         rows = [
             (Glyph.Size, "Размер", f"{Settings.scale}%"),
             (Glyph.Gap, "Позиция Y (Отступ)", f"{Settings.pos_y} px"),
@@ -3577,6 +3817,8 @@ class MainWindow(Gtk.Window):
             (Glyph.Lines, "Размер текста", f"{Settings.text_scale}%"),
             (Glyph.Look, "Стиль стекла", material_label),
             (Glyph.Sparkle, "Сила стекла", f"{Settings.glass}%"),
+            (Glyph.Lines, "Полоса трека", seek_style_label),
+            (Glyph.Pulse, "Эквалайзер", eq_style_label),
             (Glyph.Drop, "Акцентный цвет", cur_accent_label),
         ]
         row_y_start = py + 44.0
@@ -3607,3 +3849,52 @@ class MainWindow(Gtk.Window):
             else:
                 cr.set_source_rgba(col[0], col[1], col[2], alpha)
             cr.fill()
+
+    def render_update(self, cr: cairo.Context, px: float, py: float, pw: float, ph: float, alpha: float) -> None:
+        render_icon(cr, Glyph.Back, px + 20.0, py + 18.0, 10.0, COLOR_DIM[:3], alpha=0.6 * alpha)
+        draw_text(cr, "ОБНОВЛЕНИЕ", px + 36.0, py + 23.0, font_size=10.5, bold=True, color=COLOR_DIM[:3], alpha=0.6 * alpha, align="left", valign="center")
+
+        state = self._updater.state
+        latest = self._updater.latest_version
+        curr = self._updater.current_version
+
+        draw_text(cr, f"v{latest}", px + 22.0, py + 56.0, font_size=28.0, bold=True, color=COLOR_WHITE, alpha=alpha, align="left", valign="center")
+
+        status_text = "У вас актуальная версия" if state == UpdateState.LATEST else \
+                      "Доступно обновление!" if state == UpdateState.AVAILABLE else \
+                      "Проверка обновлений..." if state == UpdateState.CHECKING else \
+                      f"Загрузка... {int(self._updater.percent * 100)}%" if state == UpdateState.DOWNLOADING else \
+                      "Обновление готово к установке" if state == UpdateState.READY else \
+                      f"Ошибка: {self._updater.error_message}" if state == UpdateState.FAILED else f"Текущая версия: v{curr}"
+
+        draw_text(cr, status_text, px + 22.0, py + 84.0, font_size=12.0, color=COLOR_DIM[:3], alpha=alpha, align="left", valign="center")
+
+        ny = py + 106.0
+        if self._updater.notes:
+            for i, note in enumerate(self._updater.notes[:3]):
+                draw_text(cr, f"• {note}", px + 22.0, ny + i * 20.0, font_size=11.5, color=COLOR_WHITE, alpha=0.85 * alpha, align="left", valign="center")
+
+        btn_y = py + ph - 46.0
+        btn_w = pw - 44.0
+        btn_h = 36.0
+        btn_x = px + 22.0
+        self._btn_update_rect = (btn_x, btn_y, btn_w, btn_h)
+
+        draw_rounded_rect(cr, btn_x, btn_y, btn_w, btn_h, 12.0)
+        btn_color = COLOR_ORANGE if state in (UpdateState.AVAILABLE, UpdateState.READY) else COLOR_DIM[:3]
+        cr.set_source_rgba(btn_color[0], btn_color[1], btn_color[2], 0.3 * alpha)
+        cr.fill()
+
+        if state == UpdateState.DOWNLOADING:
+            btn_label = f"Загрузка... {int(self._updater.percent * 100)}%"
+            Ring.draw_ring(cr, btn_x + 22.0, btn_y + btn_h / 2.0, radius=8.0, thickness=2.0, progress=self._updater.percent, color=COLOR_ORANGE, alpha=alpha)
+        elif state == UpdateState.READY:
+            btn_label = "Перезапустить остров"
+        elif state == UpdateState.AVAILABLE:
+            btn_label = "Обновить и перезапустить"
+        elif state == UpdateState.CHECKING:
+            btn_label = "Проверяем..."
+        else:
+            btn_label = "Проверить снова"
+
+        draw_text(cr, btn_label, btn_x + btn_w / 2.0, btn_y + btn_h / 2.0, font_size=13.0, bold=True, color=COLOR_WHITE, alpha=alpha, align="center", valign="center")

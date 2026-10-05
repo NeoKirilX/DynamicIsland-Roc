@@ -146,6 +146,7 @@ class Equalizer:
         h: float,
         color: tuple[float, float, float] = (1.0, 1.0, 1.0),
         alpha: float = 1.0,
+        dots: bool = False,
     ) -> None:
         if w <= 0.0 or h <= 0.0:
             return
@@ -160,6 +161,44 @@ class Equalizer:
         if w <= self._bars * bar_w:
             bar_w = max(1.0, w / (self._bars * 1.8))
         gap = (w - self._bars * bar_w) / max(1, self._bars - 1) if self._bars > 1 else 0.0
+
+        if dots:
+            dot_pitch = 4.2
+            fit = h / dot_pitch
+            whole = math.floor(fit)
+            part = max(0.0, min(1.0, (fit - whole - 0.3) / 0.4))
+            rows = max(1.0, whole + part * part * (3.0 - 2.0 * part))
+            gap_y = (h - rows * bar_w) / max(1.0, rows - 1.0) if rows > 1.0 else 0.0
+
+            unlit_op = 0.16
+            lit_op = 0.72
+            head_white = 0.5
+
+            for i in range(self._bars):
+                bx = x + i * (bar_w + gap) + bar_w / 2.0
+                lit = 1.0 + self._levels[i] * (rows - 1.0)
+                cur_y = y + h - bar_w / 2.0
+
+                for r in range(int(rows)):
+                    row_presence = min(rows - r, 1.0)
+                    size = bar_w * row_presence
+                    on = max(0.0, min(1.0, lit - r))
+                    head = on * (1.0 - max(0.0, min(1.0, lit - r - 1.0)))
+
+                    op = (unlit_op + (lit_op - unlit_op) * on + (1.0 - lit_op) * head) * row_presence
+                    cr.save()
+                    cr.arc(bx, cur_y, size / 2.0, 0, 2.0 * math.pi)
+                    cr.set_source_rgba(cr_r, cr_g, cr_b, op * alpha)
+                    cr.fill()
+
+                    if head > 0.01:
+                        cr.arc(bx, cur_y, size / 2.0, 0, 2.0 * math.pi)
+                        cr.set_source_rgba(1.0, 1.0, 1.0, head_white * head * row_presence * alpha)
+                        cr.fill()
+                    cr.restore()
+
+                    cur_y -= row_presence * (bar_w + gap_y)
+            return
 
         for i in range(self._bars):
             bh = max(bar_w, bar_w + self._levels[i] * (h - bar_w))

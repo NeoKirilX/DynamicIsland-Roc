@@ -1,4 +1,4 @@
-module [LyricLine, KaraokeSweep, parseLrcLine, findActiveLine, calcKaraokeSweep]
+module [LyricLine, KaraokeSweep, parseLrcLine, findActiveLine, calcKaraokeSweep, isWordless]
 
 LyricLine : {
     time : F64,
@@ -218,6 +218,17 @@ calcKaraokeSweep = |arg1, arg2|
         totalWidth,
         unsungOpacity,
     }
+
+isWordless : Str -> Bool
+isWordless = |text|
+    bytes = Str.to_utf8 text
+    !(List.any bytes |b| (b >= '0' and b <= '9') or (b >= 'A' and b <= 'Z') or (b >= 'a' and b <= 'z'))
+
+expect isWordless "" == Bool.true
+expect isWordless "♪" == Bool.true
+expect isWordless "---" == Bool.true
+expect isWordless "Hello" == Bool.false
+expect isWordless "123" == Bool.false
 
 expect
     when parseTimestamp "[01:23.45]" is
