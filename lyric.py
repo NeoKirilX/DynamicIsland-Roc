@@ -216,7 +216,7 @@ def render_staggered_text(
                 dy = -fly_height * (t ** 1.35)
                 dx = math.sin(idx * 1.8 + 0.5) * 5.0 * t
                 rot = math.sin(idx * 2.3 + 1.1) * 0.20 * t
-                ch_alpha = a * max(0.0, 1.0 - (t ** 1.6))
+                ch_alpha = a * max(0.0, 1.0 - (t ** 1.4))
             elif anim_style == "wave":
                 d = stagger * rel
                 t = max(0.0, min(1.0, (ep - d) / max(0.01, 1.0 - stagger)))
@@ -230,7 +230,7 @@ def render_staggered_text(
                 dy = -fly_height * math.sin(t * math.pi * 0.5)
                 dx = math.sin(idx * 2.7) * 4.0 * t
                 rot = math.sin(idx * 3.1) * 0.15 * t
-                ch_alpha = a * max(0.0, 1.0 - (t ** 2.0))
+                ch_alpha = a * max(0.0, 1.0 - (t ** 1.4))
             else:  # slide
                 dy = -fly_height * ep
                 dx = 0.0
@@ -389,6 +389,9 @@ class LyricLine:
         ext = cr.text_extents(text)
         text_w = ext.x_advance
 
+        if h <= 42.0:
+            fly_height = min(fly_height, max(5.0, (h - f_height) * 0.55))
+
         is_overflowing = (text_w > max_w - 2.0 * fade_edge) or (offset_x != 0.0)
         if not is_overflowing:
             text_x = x + (max_w - text_w) / 2.0
@@ -431,6 +434,7 @@ class LyricLine:
         cr.new_path()
         text_group = cr.pop_group()
 
+        cr.push_group()
         cr.set_source(text_group)
 
         if progress is not None:
@@ -455,6 +459,16 @@ class LyricLine:
             cr.mask(grad)
         else:
             cr.paint()
+        horiz_group = cr.pop_group()
+
+        cr.set_source(horiz_group)
+        fade_v = min(7.0, h * 0.22)
+        v_grad = cairo.LinearGradient(0.0, y, 0.0, y + h)
+        v_grad.add_color_stop_rgba(0.0, 1.0, 1.0, 1.0, 0.0)
+        v_grad.add_color_stop_rgba(fade_v / h, 1.0, 1.0, 1.0, 1.0)
+        v_grad.add_color_stop_rgba(1.0 - fade_v / h, 1.0, 1.0, 1.0, 1.0)
+        v_grad.add_color_stop_rgba(1.0, 1.0, 1.0, 1.0, 0.0)
+        cr.mask(v_grad)
 
         cr.restore()
 

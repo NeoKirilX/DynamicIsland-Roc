@@ -17,6 +17,7 @@ import cairo
 
 from main_window import MainWindow, Panel, View, PLAYER_LYRIC_ROOM, PLAYER_HEIGHT
 from lyric import LyricLine, measure_text
+from settings import Settings
 
 FAILURES: list[str] = []
 
@@ -63,6 +64,7 @@ def show(win: MainWindow, view: View, panel: Panel) -> None:
 
 def on_activate(application) -> None:
     print("Testing lyric layout in the real views with long lines...")
+    Settings.text_scale = 100
 
     win = MainWindow(application, forced_view="Media", forced_timer=45.0)
     fake_media(win, 7.0)

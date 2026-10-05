@@ -1,17 +1,28 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
+import os
 import re
 import threading
 import time
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Callable
 
 import requests
 from gi.repository import GLib
 
 logger = logging.getLogger(__name__)
+
+xdg_cache = os.environ.get("XDG_CACHE_HOME")
+LYRICS_CACHE_DIR: Path = (
+    Path(xdg_cache) if xdg_cache else (Path.home() / ".cache")
+) / "dynamic-island" / "lyrics"
+LYRICS_CACHE_TTL: float = 30 * 86400.0  # 30 days
+LYRICS_CACHE_NEGATIVE_TTL: float = 2 * 86400.0  # 2 days for empty results
 
 REWORK: str = (
     r"remix|rmx|sped\s*up|speed\s*up|slowed|reverb|nightcore|hardstyle|phonk|bootleg|mashup|ремикс"
@@ -46,10 +57,14 @@ class LyricsService:
         self._session: requests.Session = requests.Session()
         self._session.headers.update({"User-Agent": "DynamicIsland/1.0"})
 
+        LYRICS_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+
         self._lock: threading.Lock = threading.Lock()
         self._candidates: list[Candidate] = []
         self._stretched: list[tuple[float, str]] = []
         self._stretched_for: float = 0.0
+        self._synced_lrc: str = ""
+        self._plain_lyrics: str = ""
         self._reworked: bool = False
         self._key: str = ""
         self._version: int = 0
@@ -58,6 +73,16 @@ class LyricsService:
         self._cache: dict[str, list[Candidate]] = {}
         self._callbacks: list[Callable[[], None]] = []
         self._changed_handler: Callable[[], None] | None = None
+
+    @property
+    def synced_lrc(self) -> str:
+        with self._lock:
+            return self._synced_lrc
+
+    @property
+    def plain_lyrics(self) -> str:
+        with self._lock:
+            return self._plain_lyrics
 
     @property
     def pending(self) -> bool:
@@ -99,12 +124,115 @@ class LyricsService:
             if callback in self._callbacks:
                 self._callbacks.remove(callback)
 
+    @classmethod
+    def get_cache_key(cls, artist: str, title: str) -> str:
+        clean_a = cls.clean_artist(artist).strip().lower()
+        clean_t = cls.clean_title(title).strip().lower()
+        if not clean_a and " - " in clean_t:
+            parts = clean_t.split(" - ", 1)
+            clean_a = parts[0].strip()
+            clean_t = parts[1].strip()
+        norm = f"{clean_a} - {clean_t}" if clean_a else clean_t
+        if not norm:
+            return ""
+        return hashlib.sha256(norm.encode("utf-8")).hexdigest()
+
+    @classmethod
+    def get_cache_keys(cls, artist: str, title: str) -> list[str]:
+        keys: list[str] = []
+        primary = cls.get_cache_key(artist, title)
+        if primary:
+            keys.append(primary)
+        raw_a = artist.strip().lower()
+        raw_t = title.strip().lower()
+        if not raw_a and " - " in raw_t:
+            parts = raw_t.split(" - ", 1)
+            raw_a = parts[0].strip()
+            raw_t = parts[1].strip()
+        norm_raw = f"{raw_a} - {raw_t}" if raw_a else raw_t
+        if norm_raw:
+            raw_key = hashlib.sha256(norm_raw.encode("utf-8")).hexdigest()
+            if raw_key not in keys:
+                keys.append(raw_key)
+        return keys
+
+    def _load_from_disk_cache(
+        self, title: str, artist: str
+    ) -> tuple[list[Candidate], str, str] | None:
+        keys = self.get_cache_keys(artist, title)
+        now = time.time()
+        for k in keys:
+            cache_file = LYRICS_CACHE_DIR / f"{k}.json"
+            if not cache_file.is_file():
+                continue
+            try:
+                with open(cache_file, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                saved_at = float(data.get("saved_at", 0.0))
+                candidates_raw = data.get("candidates", [])
+                ttl = LYRICS_CACHE_NEGATIVE_TTL if not candidates_raw else LYRICS_CACHE_TTL
+                if now - saved_at > ttl:
+                    continue
+                candidates = [
+                    Candidate(
+                        duration=float(c["duration"]),
+                        end=float(c["end"]),
+                        lines=[(float(s), str(txt)) for s, txt in c["lines"]],
+                        synced=bool(c.get("synced", True)),
+                    )
+                    for c in candidates_raw
+                ]
+                synced_lrc = str(data.get("synced_lrc", "") or "")
+                plain_lyrics = str(data.get("plain_lyrics", "") or "")
+                return candidates, synced_lrc, plain_lyrics
+            except Exception as exc:
+                logger.debug("Failed reading lyrics cache %s: %s", cache_file, exc)
+        return None
+
+    def _save_to_disk_cache(
+        self,
+        title: str,
+        artist: str,
+        candidates: list[Candidate],
+        synced_lrc: str = "",
+        plain_lyrics: str = "",
+    ) -> None:
+        primary = self.get_cache_key(artist, title)
+        if not primary:
+            return
+        cache_file = LYRICS_CACHE_DIR / f"{primary}.json"
+        data = {
+            "title": title,
+            "artist": artist,
+            "saved_at": time.time(),
+            "synced_lrc": synced_lrc,
+            "plain_lyrics": plain_lyrics,
+            "candidates": [
+                {
+                    "duration": c.duration,
+                    "end": c.end,
+                    "lines": c.lines,
+                    "synced": c.synced,
+                }
+                for c in candidates
+            ],
+        }
+        try:
+            tmp_file = cache_file.with_suffix(".tmp")
+            with open(tmp_file, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False)
+            tmp_file.replace(cache_file)
+        except Exception as exc:
+            logger.debug("Failed to write lyrics cache for %r - %r: %s", artist, title, exc)
+
     def clear(self) -> None:
         with self._lock:
             self._key = ""
             self._candidates = []
             self._stretched = []
             self._stretched_for = 0.0
+            self._synced_lrc = ""
+            self._plain_lyrics = ""
             self._reworked = False
             self._pending = False
             self._version += 1
@@ -123,6 +251,8 @@ class LyricsService:
             self._candidates = []
             self._stretched = []
             self._stretched_for = 0.0
+            self._synced_lrc = ""
+            self._plain_lyrics = ""
             self._reworked = bool(REWORKED.search(clean_t))
             self._version += 1
             version = self._version
@@ -138,8 +268,23 @@ class LyricsService:
                 self._notify_changed()
                 return
 
-            self._pending = True
+        # Instant load from disk cache if present
+        cached = self._load_from_disk_cache(clean_t, clean_a)
+        if cached is not None:
+            cached_candidates, cached_synced, cached_plain = cached
+            with self._lock:
+                if version == self._version:
+                    self._cache[key] = cached_candidates
+                    self._candidates = cached_candidates
+                    self._synced_lrc = cached_synced
+                    self._plain_lyrics = cached_plain
+                    self._pending = False
             self._notify_changed()
+            return
+
+        with self._lock:
+            self._pending = True
+        self._notify_changed()
 
         thread = threading.Thread(
             target=self._load_async,
@@ -161,11 +306,29 @@ class LyricsService:
                 self._candidates = self._cache[key]
                 return list(self._candidates)
 
-        found = self._fetch(clean_t, clean_a, duration)
+        cached = self._load_from_disk_cache(clean_t, clean_a)
+        if cached is not None:
+            cached_candidates, cached_synced, cached_plain = cached
+            with self._lock:
+                self._cache[key] = cached_candidates
+                self._key = key
+                self._candidates = cached_candidates
+                self._synced_lrc = cached_synced
+                self._plain_lyrics = cached_plain
+                self._reworked = bool(REWORKED.search(clean_t))
+                self._stretched = []
+                self._stretched_for = 0.0
+                self._pending = False
+            self._notify_changed()
+            return list(cached_candidates)
+
+        found, synced_lrc, plain_lyrics = self._fetch_with_raw(clean_t, clean_a, duration)
         with self._lock:
             self._cache[key] = found
             self._key = key
             self._candidates = found
+            self._synced_lrc = synced_lrc
+            self._plain_lyrics = plain_lyrics
             self._reworked = bool(REWORKED.search(clean_t))
             self._stretched = []
             self._stretched_for = 0.0
@@ -262,8 +425,10 @@ class LyricsService:
         self, title: str, artist: str, duration: float, version: int, key: str
     ) -> None:
         found: list[Candidate] = []
+        synced_lrc: str = ""
+        plain_lyrics: str = ""
         try:
-            found = self._fetch(title, artist, duration)
+            found, synced_lrc, plain_lyrics = self._fetch_with_raw(title, artist, duration)
         except Exception as exc:
             logger.debug("Lyrics fetch error for %r by %r: %s", title, artist, exc)
 
@@ -272,6 +437,8 @@ class LyricsService:
             if version != self._version:
                 return
             self._candidates = found
+            self._synced_lrc = synced_lrc
+            self._plain_lyrics = plain_lyrics
             self._stretched = []
             self._stretched_for = 0.0
             self._pending = False
@@ -296,13 +463,28 @@ class LyricsService:
         GLib.idle_add(_emit)
 
     def _fetch(self, title: str, artist: str, duration: float = 0.0) -> list[Candidate]:
+        candidates, _, _ = self._fetch_with_raw(title, artist, duration)
+        return candidates
+
+    def _fetch_with_raw(
+        self, title: str, artist: str, duration: float = 0.0
+    ) -> tuple[list[Candidate], str, str]:
+        cached = self._load_from_disk_cache(title, artist)
+        if cached is not None:
+            return cached
+
         candidates: list[Candidate] = []
         seen: set[str] = set()
+        best_synced_lrc: str = ""
+        best_plain_lyrics: str = ""
 
         def add_candidate(dur: float, lrc_text: str, synced: bool = True) -> None:
+            nonlocal best_synced_lrc
             lines = self.parse(lrc_text)
             if not lines:
                 return
+            if not best_synced_lrc and synced:
+                best_synced_lrc = lrc_text
             end = 0.0
             for sec, txt in reversed(lines):
                 if len(txt) > 0:
@@ -314,6 +496,9 @@ class LyricsService:
                 candidates.append(Candidate(duration=dur, end=end, lines=lines, synced=synced))
 
         def add_plain_candidate(dur: float, plain_text: str) -> None:
+            nonlocal best_plain_lyrics
+            if not best_plain_lyrics:
+                best_plain_lyrics = plain_text
             raw_lines = [
                 line.strip()
                 for line in plain_text.splitlines()
@@ -350,11 +535,14 @@ class LyricsService:
                     )
                     if isinstance(data, dict):
                         synced = data.get("syncedLyrics")
+                        plain = data.get("plainLyrics")
                         dur_val = data.get("duration")
+                        if isinstance(plain, str) and plain.strip() and not best_plain_lyrics:
+                            best_plain_lyrics = plain
                         if isinstance(synced, str) and isinstance(dur_val, (int, float)):
                             add_candidate(float(dur_val), synced, synced=True)
-                        elif isinstance(data.get("plainLyrics"), str) and isinstance(dur_val, (int, float)):
-                            add_plain_candidate(float(dur_val), data["plainLyrics"])
+                        elif isinstance(plain, str) and isinstance(dur_val, (int, float)):
+                            add_plain_candidate(float(dur_val), plain)
                 except Exception:
                     pass
 
@@ -365,13 +553,17 @@ class LyricsService:
                     if not isinstance(item, dict):
                         continue
                     synced = item.get("syncedLyrics")
+                    plain = item.get("plainLyrics")
                     dur_val = item.get("duration")
+                    if isinstance(plain, str) and plain.strip() and not best_plain_lyrics:
+                        best_plain_lyrics = plain
                     if isinstance(synced, str) and isinstance(dur_val, (int, float)):
                         add_candidate(float(dur_val), synced, synced=True)
-                    elif isinstance(item.get("plainLyrics"), str) and isinstance(dur_val, (int, float)):
-                        add_plain_candidate(float(dur_val), item["plainLyrics"])
+                    elif isinstance(plain, str) and isinstance(dur_val, (int, float)):
+                        add_plain_candidate(float(dur_val), plain)
             if candidates:
-                return candidates
+                self._save_to_disk_cache(title, artist, candidates, best_synced_lrc, best_plain_lyrics)
+                return candidates, best_synced_lrc, best_plain_lyrics
 
         song = self.clean_title(title)
         by = self.clean_artist(artist)
@@ -379,18 +571,23 @@ class LyricsService:
         try:
             self._fetch_netease(song, by, duration, add_candidate)
             if candidates:
-                return candidates
+                self._save_to_disk_cache(title, artist, candidates, best_synced_lrc, best_plain_lyrics)
+                return candidates, best_synced_lrc, best_plain_lyrics
         except Exception as exc:
             logger.debug("NetEase fetch error: %s", exc)
 
         try:
             self._fetch_lyrics_ovh(song, by, duration, candidates, seen)
             if candidates:
-                return candidates
+                if not best_plain_lyrics and candidates:
+                    best_plain_lyrics = "\n".join(txt for _, txt in candidates[0].lines if txt)
+                self._save_to_disk_cache(title, artist, candidates, best_synced_lrc, best_plain_lyrics)
+                return candidates, best_synced_lrc, best_plain_lyrics
         except Exception as exc:
             logger.debug("Lyrics.ovh fetch error: %s", exc)
 
-        return candidates
+        self._save_to_disk_cache(title, artist, [], "", "")
+        return candidates, best_synced_lrc, best_plain_lyrics
 
     def _fetch_netease(
         self,

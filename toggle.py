@@ -6,10 +6,10 @@ import math
 import cairo
 
 class Toggle:
-    DEFAULT_WIDTH: float = 38.0
-    DEFAULT_HEIGHT: float = 22.0
+    DEFAULT_WIDTH: float = 46.0
+    DEFAULT_HEIGHT: float = 24.0
     KNOB_INSET: float = 2.0
-    KNOB_ASPECT: float = 26.0 / 18.0
+    KNOB_ASPECT: float = 1.0
     DURATION: float = 0.24
 
     PRESSED_WIDER: float = 0.20

@@ -25,7 +25,10 @@ from gi.repository import Gio, GLib
 
 logger = logging.getLogger(__name__)
 
-COVER_CACHE_DIR = Path(tempfile.gettempdir()) / "dynamic_island_covers"
+xdg_cache = os.environ.get("XDG_CACHE_HOME")
+COVER_CACHE_DIR = (
+    Path(xdg_cache) if xdg_cache else (Path.home() / ".cache")
+) / "dynamic-island" / "covers"
 
 TURN_DEGREES: float = 28.0
 MIN_MUSIC_DURATION: float = 30.0
@@ -33,23 +36,38 @@ MIN_MUSIC_DURATION: float = 30.0
 DEFAULT_PALETTE: list[tuple[float, float, float]] = [(1.0, 1.0, 1.0)]
 DEFAULT_ACCENT: tuple[float, float, float] = (1.0, 1.0, 1.0)
 
-def crop_to_square(img_path: Path) -> None:
-    if Image is None or not img_path.exists():
-        return
+def crop_to_square(src_path: Path, dst_path: Optional[Path] = None) -> bool:
+    if Image is None or not src_path.exists():
+        return False
+    target = dst_path or src_path
     try:
-        with Image.open(img_path) as im:
+        with Image.open(src_path) as im:
             w, h = im.size
-            if w == h:
-                return
+            if w == h and (dst_path is None or src_path == dst_path):
+                return True
             min_dim = min(w, h)
             left = (w - min_dim) // 2
             top = (h - min_dim) // 2
             right = left + min_dim
             bottom = top + min_dim
             cropped = im.crop((left, top, right, bottom))
-            cropped.save(img_path, format="JPEG", quality=92)
+
+            if cropped.mode in ("RGBA", "LA", "P"):
+                bg = Image.new("RGB", cropped.size, (24, 24, 28))
+                if cropped.mode == "P":
+                    cropped = cropped.convert("RGBA")
+                bg.paste(cropped, mask=cropped.split()[-1])
+                cropped = bg
+            elif cropped.mode != "RGB":
+                cropped = cropped.convert("RGB")
+
+            tmp_target = target.with_suffix(".tmp.jpg")
+            cropped.save(tmp_target, format="JPEG", quality=92)
+            tmp_target.replace(target)
+            return True
     except Exception as e:
-        logger.debug("Crop to square failed for %s: %s", img_path, e)
+        logger.debug("Crop to square failed for %s -> %s: %s", src_path, target, e)
+        return False
 
 def turn_hue(rgb: tuple[float, float, float], degrees: float) -> tuple[float, float, float]:
     r, g, b = rgb
@@ -226,34 +244,40 @@ def resolve_desktop_friendly_name(desktop_entry: str, identity: str = "", bus_na
     return known_map.get(bus_part.lower(), bus_part.capitalize() if bus_part else "Media Player")
 
 TRACK_TAGS_PATTERN = re.compile(
-    r"[\(\[]\s*(?:"
-    r"official\s+music\s+video|"
-    r"official\s+video|"
-    r"official\s+audio|"
-    r"visuali[sz]er|"
-    r"lyric\s+video|"
-    r"lyrics?|"
+    r"\s*[\(\[][^\)\]]*\b(?:"
+    r"official\s*(music|video|audio)?|"
+    r"video|"
     r"audio|"
+    r"lyrics?|"
+    r"visuali[sz]er|"
+    r"remaster(?:ed)?|"
+    r"hd|hq|4k|8k|"
+    r"mv|"
+    r"feat(?:uring|\.)?|"
+    r"ft\.?|"
+    r"prod\.?|"
+    r"edit|"
+    r"mix|"
+    r"version|"
+    r"cover|"
     r"sped\s*up|"
     r"speed\s*up|"
     r"spedup|"
-    r"slowed\s*[\+&]\s*reverb|"
-    r"slowed|"
-    r"официальное\s+видео|"
-    r"официальный\s+клип|"
-    r"премьера\s+трека|"
-    r"премьера\s+клипа|"
+    r"slowed\s*(?:[\+&]\s*reverb)?|"
     r"клип|"
+    r"премьера|"
     r"аудио"
-    r")\s*[\)\]]",
+    r")\b[^\)\]]*[\)\]]",
     re.IGNORECASE,
 )
+TRACK_PIPES_PATTERN = re.compile(r"\s*\|[^|]*\|\s*|\s+\|\s.*$")
 TRACK_JUNK_CHARS = " \t\r\n-–—―:()[]{}"
 
 def clean_track_title(raw_title: str) -> str:
     if not raw_title:
         return ""
     cleaned = TRACK_TAGS_PATTERN.sub("", raw_title)
+    cleaned = TRACK_PIPES_PATTERN.sub(" ", cleaned)
     cleaned = re.sub(r"[\(\[]\s*[\)\]]", "", cleaned)
     cleaned = re.sub(r"\s+", " ", cleaned)
     cleaned = cleaned.strip(TRACK_JUNK_CHARS)
@@ -277,6 +301,81 @@ def format_display_title(
         return songname
     return f"{songname} — {author}"
 
+def get_track_cache_key(artist: str, title: str) -> str:
+    art = artist.strip()
+    tit = clean_track_title(title).strip() or title.strip()
+    if not art and " - " in tit:
+        parts = tit.split(" - ", 1)
+        art = parts[0].strip()
+        tit = clean_track_title(parts[1]).strip() or parts[1].strip()
+
+    if art and tit:
+        norm = f"{art.lower()} - {tit.lower()}"
+    elif tit:
+        norm = tit.lower()
+    elif art:
+        norm = art.lower()
+    else:
+        return ""
+
+    return hashlib.sha256(norm.encode("utf-8")).hexdigest()
+
+def get_track_cache_keys(artist: str, title: str) -> list[str]:
+    keys: list[str] = []
+    primary = get_track_cache_key(artist, title)
+    if primary:
+        keys.append(primary)
+
+    art_raw = artist.strip().lower()
+    tit_raw = title.strip().lower()
+    if not art_raw and " - " in tit_raw:
+        parts = tit_raw.split(" - ", 1)
+        art_raw = parts[0].strip()
+        tit_raw = parts[1].strip()
+    if art_raw and tit_raw:
+        raw_norm = f"{art_raw} - {tit_raw}"
+    elif tit_raw:
+        raw_norm = tit_raw
+    elif art_raw:
+        raw_norm = art_raw
+    else:
+        raw_norm = ""
+
+    if raw_norm:
+        raw_key = hashlib.sha256(raw_norm.encode("utf-8")).hexdigest()
+        if raw_key not in keys:
+            keys.append(raw_key)
+
+    return keys
+
+def find_cached_cover(artist: str, title: str) -> Optional[Path]:
+    if not artist and not title:
+        return None
+    for k in get_track_cache_keys(artist, title):
+        for ext in (".jpg", ".jpeg", ".png", ".webp"):
+            cand = COVER_CACHE_DIR / f"{k}{ext}"
+            if cand.is_file() and cand.stat().st_size > 0:
+                return cand
+            cand_short = COVER_CACHE_DIR / f"{k[:16]}{ext}"
+            if cand_short.is_file() and cand_short.stat().st_size > 0:
+                return cand_short
+            cand_ytdlp = COVER_CACHE_DIR / f"ytdlp_{k[:16]}{ext}"
+            if cand_ytdlp.is_file() and cand_ytdlp.stat().st_size > 0:
+                return cand_ytdlp
+    return None
+
+def find_cached_cover_by_url(art_url: str) -> Optional[Path]:
+    if not art_url:
+        return None
+    h16 = hashlib.sha256(art_url.encode("utf-8")).hexdigest()[:16]
+    h64 = hashlib.sha256(art_url.encode("utf-8")).hexdigest()
+    for h in (h64, h16):
+        for ext in (".jpg", ".jpeg", ".png", ".webp"):
+            cand = COVER_CACHE_DIR / f"{h}{ext}"
+            if cand.is_file() and cand.stat().st_size > 0:
+                return cand
+    return None
+
 __all__ = [
     "MediaService",
     "PlayerSession",
@@ -284,6 +383,12 @@ __all__ = [
     "format_display_title",
     "extract_dominant_palette",
     "resolve_desktop_friendly_name",
+    "crop_to_square",
+    "get_track_cache_key",
+    "get_track_cache_keys",
+    "find_cached_cover",
+    "find_cached_cover_by_url",
+    "COVER_CACHE_DIR",
 ]
 
 @dataclass
@@ -300,6 +405,7 @@ class PlayerSession:
     album: str = ""
     art_url: str = ""
     art_path: Optional[str] = None
+    url: str = ""
     duration: float = 0.0
     position: float = 0.0
     position_at: float = field(default_factory=time.monotonic)
@@ -348,6 +454,14 @@ class MediaService:
         self._source_id: str = ""
         self._version: int = 0
         self._last_playing: float = 0.0
+
+        self._active_ytdlp_proc: Optional[subprocess.Popen] = None
+        self._ytdlp_timer: Optional[threading.Timer] = None
+        self._in_flight_queries: set[str] = set()
+        self._in_flight_urls: set[str] = set()
+        self._failed_queries: set[str] = set()
+        self._failed_urls: set[str] = set()
+        self._ytdlp_bin: Optional[str] = None
 
         self._context = GLib.MainContext()
         self._loop = GLib.MainLoop(self._context)
@@ -622,6 +736,7 @@ class MediaService:
                 if self._chosen == name:
                     self._chosen = None
                 if self._current_player == name:
+                    self._cancel_active_ytdlp()
                     self._current_player = None
                     self._pick_and_attach()
                 self._notify_changed()
@@ -895,33 +1010,116 @@ class MediaService:
         with self._lock:
             self._players[bus_name] = session
 
+    def _find_ytdlp_bin(self) -> Optional[str]:
+        if self._ytdlp_bin and os.path.isfile(self._ytdlp_bin) and os.access(self._ytdlp_bin, os.X_OK):
+            return self._ytdlp_bin
+        bin_path = shutil.which("yt-dlp")
+        if bin_path:
+            self._ytdlp_bin = bin_path
+            return bin_path
+        for cand in (
+            Path.home() / ".local" / "bin" / "yt-dlp",
+            Path("/usr/local/bin/yt-dlp"),
+            Path("/usr/bin/yt-dlp"),
+        ):
+            if cand.is_file() and os.access(cand, os.X_OK):
+                self._ytdlp_bin = str(cand)
+                return self._ytdlp_bin
+        return None
+
+    def _cancel_active_ytdlp(self) -> None:
+        with self._lock:
+            if self._ytdlp_timer is not None:
+                self._ytdlp_timer.cancel()
+                self._ytdlp_timer = None
+
+            proc = self._active_ytdlp_proc
+            self._active_ytdlp_proc = None
+
+        if proc and proc.poll() is None:
+            try:
+                proc.terminate()
+                try:
+                    proc.wait(timeout=0.15)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+            except Exception:
+                pass
+
+    def _download_image_file(self, url: str, target_path: Path) -> bool:
+        tmp_path = target_path.with_name(f"{target_path.stem}.tmp.{os.getpid()}_{threading.get_ident()}{target_path.suffix}")
+        try:
+            req = urllib.request.Request(
+                url,
+                headers={"User-Agent": "DynamicIsland/1.0 (Linux Wayland MPRIS)"},
+            )
+            with urllib.request.urlopen(req, timeout=6.0) as resp:
+                data = resp.read()
+            if not data:
+                return False
+            with open(tmp_path, "wb") as f:
+                f.write(data)
+            crop_to_square(tmp_path)
+            tmp_path.replace(target_path)
+            return True
+        except Exception as e:
+            logger.debug("Failed downloading image %s: %s", url, e)
+            try:
+                if tmp_path.exists():
+                    tmp_path.unlink()
+            except Exception:
+                pass
+            return False
+
     def _parse_metadata(self, session: PlayerSession, meta: dict[str, Any]) -> None:
         old_title = session.title
+        old_artist = session.artist
         old_track_id = session.track_id
+        old_art_url = session.art_url
 
         new_title = str(meta.get("xesam:title", "") or "")
         track_id = meta.get("mpris:trackid")
         new_track_id = str(track_id) if track_id else None
 
-        if (new_title and new_title != old_title) or (new_track_id and new_track_id != old_track_id):
-            session.position = 0.0
-            session.position_at = time.monotonic()
-
-        session.title = new_title
-
         artists = meta.get("xesam:artist") or meta.get("xesam:albumArtist") or []
         if isinstance(artists, (list, tuple)):
-            session.artist = ", ".join(str(a) for a in artists if a)
+            new_artist = ", ".join(str(a) for a in artists if a)
         else:
-            session.artist = str(artists or "")
+            new_artist = str(artists or "")
 
-        session.album = str(meta.get("xesam:album", "") or "")
+        new_album = str(meta.get("xesam:album", "") or "")
+        raw_url = str(meta.get("xesam:url", "") or "")
 
-        track_id = meta.get("mpris:trackid")
-        session.track_id = str(track_id) if track_id else None
+        track_changed = (
+            (new_title and new_title != old_title)
+            or (new_track_id and new_track_id != old_track_id)
+            or (new_artist != old_artist)
+        )
+
+        if track_changed:
+            session.position = 0.0
+            session.position_at = time.monotonic()
+            if self._current_player == session.bus_name:
+                self._cancel_active_ytdlp()
+
+        session.title = new_title
+        session.artist = new_artist
+        session.album = new_album
+        session.track_id = new_track_id
+        session.url = raw_url
 
         length_us = meta.get("mpris:length", 0)
         session.duration = max(0.0, float(length_us) / 1_000_000.0) if length_us else 0.0
+
+        # Fast path: instant disk cache lookup by deterministic artist - title key
+        # Skips all network requests and subprocess calls (playerctl, yt-dlp)
+        cached_cover = find_cached_cover(new_artist, new_title)
+        if cached_cover:
+            crop_to_square(cached_cover)
+            session.art_path = str(cached_cover)
+            new_art_url = str(meta.get("mpris:artUrl", "") or meta.get("artUrl", "") or meta.get("xesam:artUrl", "") or "")
+            session.art_url = new_art_url or cached_cover.as_uri()
+            return
 
         new_art_url = str(meta.get("mpris:artUrl", "") or "")
         if not new_art_url:
@@ -943,7 +1141,6 @@ class MediaService:
                 pass
 
         if not new_art_url:
-            raw_url = str(meta.get("xesam:url", "") or "")
             if raw_url.startswith("file://"):
                 local_music = Path(urllib.parse.unquote(urllib.parse.urlsplit(raw_url).path))
             elif raw_url.startswith("/"):
@@ -959,17 +1156,42 @@ class MediaService:
                         new_art_url = cand_path.as_uri()
                         break
 
-        session.art_url = new_art_url
-        session.art_path = self._process_art_url(new_art_url)
-        if not session.art_path and session.title:
-            self._async_fetch_ytdlp_cover(session)
+        if track_changed:
+            session.art_url = new_art_url
+            session.art_path = None
+            if new_art_url:
+                session.art_path = self._process_art_url(new_art_url, session=session)
+            else:
+                self._resolve_session_art(session)
+        else:
+            if new_art_url and (new_art_url != old_art_url or not session.art_path):
+                session.art_url = new_art_url
+                session.art_path = self._process_art_url(new_art_url, session=session)
+            elif not session.art_path and not session.art_url:
+                self._resolve_session_art(session)
 
-    def _process_art_url(self, art_url: str) -> Optional[str]:
+    def _process_art_url(self, art_url: str, session: Optional[PlayerSession] = None) -> Optional[str]:
         if not art_url:
             return None
 
         try:
+            title = session.title if session else ""
+            artist = session.artist if session else ""
+
+            cached_track = find_cached_cover(artist, title)
+            if cached_track:
+                crop_to_square(cached_track)
+                return str(cached_track)
+
+            cached_by_url = find_cached_cover_by_url(art_url)
+            if cached_by_url:
+                crop_to_square(cached_by_url)
+                return str(cached_by_url)
+
+            track_key = get_track_cache_key(artist, title)
             url_hash = hashlib.sha256(art_url.encode("utf-8")).hexdigest()[:16]
+            file_name = f"{track_key}.jpg" if track_key else f"{url_hash}.jpg"
+            cached_file = COVER_CACHE_DIR / file_name
 
             if art_url.startswith("file://") or art_url.startswith("/"):
                 if art_url.startswith("file://"):
@@ -979,38 +1201,51 @@ class MediaService:
                     local_path = Path(art_url)
 
                 if local_path.is_file():
-                    cached_file = COVER_CACHE_DIR / f"{url_hash}{local_path.suffix or '.jpg'}"
                     if not cached_file.exists():
-                        try:
-                            shutil.copyfile(local_path, cached_file)
-                        except Exception:
-                            return str(local_path)
+                        if not crop_to_square(local_path, dst_path=cached_file):
+                            try:
+                                shutil.copyfile(local_path, cached_file)
+                                crop_to_square(cached_file)
+                            except Exception:
+                                return str(local_path)
+                    else:
+                        crop_to_square(cached_file)
                     return str(cached_file)
 
             elif art_url.startswith("data:image/"):
-                cached_file = COVER_CACHE_DIR / f"{url_hash}.png"
                 if not cached_file.exists():
                     _header, data = art_url.split(",", 1)
                     img_bytes = base64.b64decode(data)
-                    with open(cached_file, "wb") as f:
+                    tmp_file = cached_file.with_name(f"{cached_file.stem}.tmp.{os.getpid()}_{threading.get_ident()}.raw")
+                    with open(tmp_file, "wb") as f:
                         f.write(img_bytes)
+                    crop_to_square(tmp_file, dst_path=cached_file)
+                    if tmp_file.exists():
+                        try:
+                            tmp_file.unlink()
+                        except Exception:
+                            pass
+                else:
+                    crop_to_square(cached_file)
                 return str(cached_file)
 
             elif art_url.startswith("http://") or art_url.startswith("https://"):
-                ext = ".jpg"
-                clean_path = urllib.parse.urlsplit(art_url).path
-                if "." in clean_path:
-                    cand_ext = "." + clean_path.rsplit(".", 1)[-1].lower()
-                    if cand_ext in (".jpg", ".jpeg", ".png", ".webp"):
-                        ext = cand_ext
-                cached_file = COVER_CACHE_DIR / f"{url_hash}{ext}"
-                if cached_file.exists() and cached_file.stat().st_size > 0:
+                if cached_file.is_file() and cached_file.stat().st_size > 0:
+                    crop_to_square(cached_file)
                     return str(cached_file)
 
+                with self._lock:
+                    if art_url in self._failed_urls or art_url in self._in_flight_urls:
+                        return None
+                    self._in_flight_urls.add(art_url)
+
+                title = session.title if session else ""
+                artist = session.artist if session else ""
                 threading.Thread(
                     target=self._async_download_cover,
-                    args=(art_url, cached_file),
+                    args=(art_url, cached_file, session, title, artist),
                     daemon=True,
+                    name=f"MediaService-HttpCover-{url_hash}",
                 ).start()
                 return None
 
@@ -1018,100 +1253,297 @@ class MediaService:
             logger.debug("Failed processing art URL %s: %s", art_url, e)
         return None
 
-    def _async_download_cover(self, url: str, target_path: Path, session: Optional[PlayerSession] = None) -> None:
+    def _async_download_cover(
+        self,
+        url: str,
+        target_path: Path,
+        session: Optional[PlayerSession] = None,
+        expected_title: str = "",
+        expected_artist: str = "",
+    ) -> None:
         try:
-            req = urllib.request.Request(
-                url,
-                headers={"User-Agent": "DynamicIsland/1.0 (Linux Wayland MPRIS)"},
-            )
-            with urllib.request.urlopen(req, timeout=8.0) as resp:
-                data = resp.read()
-            with open(target_path, "wb") as f:
-                f.write(data)
-
-            crop_to_square(target_path)
-
+            ok = self._download_image_file(url, target_path)
             with self._lock:
-                if session is not None:
-                    session.art_path = str(target_path)
+                self._in_flight_urls.discard(url)
+                if not ok:
+                    self._failed_urls.add(url)
+                    if len(self._failed_urls) > 200:
+                        self._failed_urls.pop()
+                    return
+
+                if not (target_path.is_file() and target_path.stat().st_size > 0):
+                    return
+
                 for s in self._players.values():
                     if s.art_url == url:
-                        s.art_path = str(target_path)
-                if (session is not None and self._current_player == session.bus_name) or self._art_url == url or not self._art_path:
+                        if not expected_title or (s.title == expected_title and s.artist == expected_artist):
+                            s.art_path = str(target_path)
+
+                if session is not None and session.art_url == url:
+                    if not expected_title or (session.title == expected_title and session.artist == expected_artist):
+                        session.art_path = str(target_path)
+
+                cur_sess = self._players.get(self._current_player) if self._current_player else None
+                if (
+                    cur_sess
+                    and cur_sess.art_url == url
+                    and (not expected_title or (cur_sess.title == expected_title and cur_sess.artist == expected_artist))
+                ):
                     self._art_path = str(target_path)
                     self._palette, self._accent = extract_dominant_palette(target_path)
                     GLib.idle_add(self._notify_changed)
         except Exception as e:
             logger.debug("Async cover download failed for %s: %s", url, e)
+            with self._lock:
+                self._in_flight_urls.discard(url)
+                self._failed_urls.add(url)
 
-    def _async_fetch_ytdlp_cover(self, session: PlayerSession) -> None:
-        title = session.title
-        artist = session.artist
-        track_url = session.url
-        if not title:
+    def _resolve_session_art(self, session: PlayerSession) -> None:
+        if session.art_path and Path(session.art_path).is_file():
+            return
+        if session.art_url:
+            return
+        if not session.title or not session.title.strip():
+            return
+        if not (session.is_playing or session.bus_name == self._current_player):
             return
 
-        query_key = f"{artist} - {title}" if artist else title
-        url_hash = hashlib.sha256(query_key.encode("utf-8")).hexdigest()[:16]
-        cached_file = COVER_CACHE_DIR / f"ytdlp_{url_hash}.jpg"
+        cached = find_cached_cover(session.artist, session.title)
+        if cached:
+            crop_to_square(cached)
+            session.art_path = str(cached)
+            if self._current_player == session.bus_name and self._title == session.title:
+                self._art_path = str(cached)
+                self._palette, self._accent = extract_dominant_palette(cached)
+                GLib.idle_add(self._notify_changed)
+            return
 
-        if cached_file.exists() and cached_file.stat().st_size > 0:
+        query_key = f"{session.artist} - {session.title}" if session.artist else session.title
+        with self._lock:
+            if query_key in self._failed_queries or query_key in self._in_flight_queries:
+                return
+
+        self._schedule_ytdlp_fetch(session)
+
+    def _schedule_ytdlp_fetch(self, session: PlayerSession) -> None:
+        if not session.title or not session.title.strip():
+            return
+        if session.art_url:
+            return
+        if session.art_path and Path(session.art_path).is_file():
+            return
+        if not (session.is_playing or session.bus_name == self._current_player):
+            return
+
+        query_key = f"{session.artist} - {session.title}" if session.artist else session.title
+        with self._lock:
+            if query_key in self._failed_queries or query_key in self._in_flight_queries:
+                return
+
+            if self._ytdlp_timer is not None:
+                self._ytdlp_timer.cancel()
+                self._ytdlp_timer = None
+
+            proc = self._active_ytdlp_proc
+            self._active_ytdlp_proc = None
+            if proc and proc.poll() is None:
+                try:
+                    proc.terminate()
+                except Exception:
+                    pass
+
+            bus_name = session.bus_name
+            track_title = session.title
+            track_artist = session.artist
+            track_url = getattr(session, "url", "")
+
+            self._ytdlp_timer = threading.Timer(
+                0.35,
+                self._execute_ytdlp_fetch,
+                args=(bus_name, track_title, track_artist, query_key, track_url),
+            )
+            self._ytdlp_timer.daemon = True
+            self._ytdlp_timer.name = "MediaService-YtDlpTimer"
+            self._ytdlp_timer.start()
+
+    def _execute_ytdlp_fetch(
+        self,
+        bus_name: str,
+        expected_title: str,
+        expected_artist: str,
+        query_key: str,
+        track_url: str,
+    ) -> None:
+        with self._lock:
+            self._ytdlp_timer = None
+            sess = self._players.get(bus_name)
+            if not sess or sess.title != expected_title or sess.artist != expected_artist:
+                return
+            if sess.art_path and Path(sess.art_path).is_file():
+                return
+            if sess.art_url:
+                return
+            if query_key in self._failed_queries or query_key in self._in_flight_queries:
+                return
+            self._in_flight_queries.add(query_key)
+
+        url_hash = hashlib.sha256(query_key.encode("utf-8")).hexdigest()[:16]
+        cached_file = find_cached_cover(expected_artist, expected_title)
+        if not cached_file:
+            track_key = get_track_cache_key(expected_artist, expected_title)
+            cached_file = COVER_CACHE_DIR / f"{track_key}.jpg" if track_key else COVER_CACHE_DIR / f"ytdlp_{url_hash}.jpg"
+
+        if cached_file.is_file() and cached_file.stat().st_size > 0:
             crop_to_square(cached_file)
             with self._lock:
-                session.art_path = str(cached_file)
-                if self._current_player == session.bus_name or not self._art_path:
+                self._in_flight_queries.discard(query_key)
+                sess = self._players.get(bus_name)
+                if (
+                    sess
+                    and sess.title == expected_title
+                    and sess.artist == expected_artist
+                    and (not sess.art_path or not Path(sess.art_path).is_file())
+                ):
+                    sess.art_path = str(cached_file)
+                if (
+                    self._current_player == bus_name
+                    and self._title == expected_title
+                    and (not self._art_path or not Path(self._art_path).is_file())
+                ):
                     self._art_path = str(cached_file)
                     self._palette, self._accent = extract_dominant_palette(cached_file)
                     GLib.idle_add(self._notify_changed)
             return
 
-        def worker():
-            thumb_url = None
-            if shutil.which("yt-dlp"):
+        threading.Thread(
+            target=self._ytdlp_worker,
+            args=(bus_name, expected_title, expected_artist, query_key, track_url, cached_file),
+            daemon=True,
+            name=f"MediaService-YtDlpWorker-{url_hash}",
+        ).start()
+
+    def _ytdlp_worker(
+        self,
+        bus_name: str,
+        expected_title: str,
+        expected_artist: str,
+        query_key: str,
+        track_url: str,
+        cached_file: Path,
+    ) -> None:
+        thumb_url: Optional[str] = None
+        ytdlp_bin = self._find_ytdlp_bin()
+        was_cancelled = False
+
+        if ytdlp_bin:
+            target = track_url if (track_url and track_url.startswith("http")) else f"ytsearch1:{query_key}"
+            try:
+                cmd = [
+                    ytdlp_bin,
+                    "--no-update",
+                    "--no-warnings",
+                    "--get-thumbnail",
+                    "--socket-timeout", "6",
+                    target,
+                ]
+                proc = subprocess.Popen(
+                    cmd,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                )
+                with self._lock:
+                    self._active_ytdlp_proc = proc
+
                 try:
-                    target = track_url if (track_url and track_url.startswith("http")) else f"ytsearch1:{query_key}"
-                    res = subprocess.run(
-                        ["yt-dlp", "--get-thumbnail", "--no-warnings", target],
-                        capture_output=True,
-                        text=True,
-                        timeout=9.0,
-                        check=False,
-                    )
-                    if res.returncode == 0 and res.stdout.strip():
-                        thumb_url = res.stdout.strip().splitlines()[0]
-                except Exception as e:
-                    logger.debug("yt-dlp CLI query failed for %s: %s", query_key, e)
+                    stdout, _ = proc.communicate(timeout=8.0)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    stdout, _ = proc.communicate()
+                finally:
+                    with self._lock:
+                        if self._active_ytdlp_proc is proc:
+                            self._active_ytdlp_proc = None
 
-            if not thumb_url:
-                try:
-                    import importlib
-                    ytdlp_mod = importlib.import_module("yt_dlp")
-                    ydl_opts = {
-                        "quiet": True,
-                        "skip_download": True,
-                        "extract_flat": True,
-                        "noplaylist": True,
-                        "socket_timeout": 8,
-                    }
-                    target = track_url if (track_url and track_url.startswith("http")) else f"ytsearch1:{query_key}"
-                    with ytdlp_mod.YoutubeDL(ydl_opts) as ydl:
-                        info = ydl.extract_info(target, download=False)
-                        if info:
-                            item = info["entries"][0] if ("entries" in info and info["entries"]) else info
-                            thumbs = item.get("thumbnails")
-                            if isinstance(thumbs, list) and thumbs:
-                                thumb_url = thumbs[-1].get("url") or thumbs[0].get("url")
-                            elif isinstance(thumbs, str):
-                                thumb_url = thumbs
-                            elif item.get("thumbnail"):
-                                thumb_url = item.get("thumbnail")
-                except Exception as e:
-                    logger.debug("yt_dlp python module query failed for %s: %s", query_key, e)
+                if proc.returncode != 0:
+                    was_cancelled = True
+                elif stdout:
+                    for line in stdout.strip().splitlines():
+                        line_s = line.strip()
+                        if line_s.startswith("http://") or line_s.startswith("https://"):
+                            thumb_url = line_s
+                            break
+            except Exception as e:
+                logger.debug("yt-dlp CLI query failed for %s: %s", query_key, e)
+        else:
+            try:
+                import yt_dlp
+                ydl_opts = {
+                    "quiet": True,
+                    "skip_download": True,
+                    "extract_flat": True,
+                    "noplaylist": True,
+                    "socket_timeout": 6,
+                }
+                target = track_url if (track_url and track_url.startswith("http")) else f"ytsearch1:{query_key}"
+                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                    info = ydl.extract_info(target, download=False)
+                    if info:
+                        item = info["entries"][0] if ("entries" in info and info["entries"]) else info
+                        thumbs = item.get("thumbnails")
+                        if isinstance(thumbs, list) and thumbs:
+                            thumb_url = thumbs[-1].get("url") or thumbs[0].get("url")
+                        elif isinstance(thumbs, str):
+                            thumb_url = thumbs
+                        elif item.get("thumbnail"):
+                            thumb_url = item.get("thumbnail")
+            except Exception as e:
+                logger.debug("yt_dlp python module query failed for %s: %s", query_key, e)
 
-            if thumb_url:
-                self._async_download_cover(thumb_url, cached_file, session=session)
+        with self._lock:
+            sess = self._players.get(bus_name)
+            if (
+                was_cancelled
+                or not sess
+                or sess.title != expected_title
+                or sess.artist != expected_artist
+                or (sess.art_path and Path(sess.art_path).is_file())
+            ):
+                self._in_flight_queries.discard(query_key)
+                return
 
-        threading.Thread(target=worker, daemon=True).start()
+        if thumb_url:
+            download_ok = self._download_image_file(thumb_url, cached_file)
+            if download_ok and cached_file.is_file() and cached_file.stat().st_size > 0:
+                with self._lock:
+                    self._in_flight_queries.discard(query_key)
+                    sess = self._players.get(bus_name)
+                    if (
+                        sess
+                        and sess.title == expected_title
+                        and sess.artist == expected_artist
+                        and (not sess.art_path or not Path(sess.art_path).is_file())
+                    ):
+                        sess.art_path = str(cached_file)
+                    if (
+                        self._current_player == bus_name
+                        and self._title == expected_title
+                        and (not self._art_path or not Path(self._art_path).is_file())
+                    ):
+                        self._art_path = str(cached_file)
+                        self._palette, self._accent = extract_dominant_palette(cached_file)
+                        GLib.idle_add(self._notify_changed)
+                return
+
+        with self._lock:
+            self._in_flight_queries.discard(query_key)
+            if not was_cancelled:
+                self._failed_queries.add(query_key)
+                if len(self._failed_queries) > 200:
+                    self._failed_queries.pop()
+
+    def _async_fetch_ytdlp_cover(self, session: PlayerSession) -> None:
+        self._resolve_session_art(session)
 
     def _yield(self, playing_bus_name: str) -> None:
         sess = self._players.get(playing_bus_name)
@@ -1156,6 +1588,7 @@ class MediaService:
         with self._lock:
             self._version += 1
             if not bus_name or bus_name not in self._players:
+                self._cancel_active_ytdlp()
                 self._current_player = None
                 self._title = ""
                 self._artist = ""
@@ -1174,12 +1607,19 @@ class MediaService:
                 self._source_id = ""
                 return
 
+            if self._current_player != bus_name:
+                self._cancel_active_ytdlp()
+
             self._current_player = bus_name
             session = self._players[bus_name]
             self._sync_current_from_session(session)
+            if not session.art_path and not session.art_url:
+                self._resolve_session_art(session)
 
     def _sync_current_from_session(self, session: PlayerSession) -> None:
         was_playing = self._is_playing
+        track_changed = (self._title != session.title or self._artist != session.artist)
+
         self._title = session.title
         self._artist = session.artist
         self._album = session.album
@@ -1199,23 +1639,28 @@ class MediaService:
             self._position = session.position
             self._position_at = session.position_at
 
-        if session.art_url and not session.art_path:
-            url_hash = hashlib.sha256(session.art_url.encode("utf-8")).hexdigest()[:16]
-            for ext in (".jpg", ".jpeg", ".png", ".webp"):
-                cand = COVER_CACHE_DIR / f"{url_hash}{ext}"
-                if cand.is_file() and cand.stat().st_size > 0:
-                    session.art_path = str(cand)
-                    break
+        if not (session.art_path and Path(session.art_path).is_file()):
+            cached = find_cached_cover(session.artist, session.title)
+            if cached:
+                crop_to_square(cached)
+                session.art_path = str(cached)
+            elif session.art_url:
+                cached_url = find_cached_cover_by_url(session.art_url)
+                if cached_url:
+                    crop_to_square(cached_url)
+                    session.art_path = str(cached_url)
 
-        if session.art_path and session.art_path != self._art_path:
-            self._art_url = session.art_url
-            self._art_path = session.art_path
-            self._palette, self._accent = extract_dominant_palette(session.art_path)
-        elif not session.art_path:
-            self._art_url = session.art_url
-            self._art_path = None
-            self._palette = list(DEFAULT_PALETTE)
-            self._accent = DEFAULT_ACCENT
+        if session.art_path and Path(session.art_path).is_file():
+            if session.art_path != self._art_path:
+                self._art_url = session.art_url
+                self._art_path = session.art_path
+                self._palette, self._accent = extract_dominant_palette(session.art_path)
+        else:
+            if track_changed or not self._art_path:
+                self._art_url = session.art_url
+                self._art_path = None
+                self._palette = list(DEFAULT_PALETTE)
+                self._accent = DEFAULT_ACCENT
 
     def next_player(self) -> bool:
         return self.switch(1)
@@ -1465,6 +1910,7 @@ class MediaService:
 
     def close(self) -> None:
         self._running = False
+        self._cancel_active_ytdlp()
         if hasattr(self, "_poll_source") and self._poll_source:
             try:
                 self._poll_source.destroy()

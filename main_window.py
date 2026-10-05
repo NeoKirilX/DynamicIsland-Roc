@@ -51,7 +51,21 @@ from native_wayland import is_ctrl_down, is_fullscreen, query_do_not_disturb
 from network_service import Link, NetworkService, State
 from ring import Ring
 from row_list import RowList
-from settings import ALIGN_CENTER, ALIGN_LEFT, ALIGN_RIGHT, ALIGNS, MATERIAL_LIQUID, MATERIAL_MATTE, MATERIAL_NONE, Settings
+from settings import (
+    ALIGN_CENTER,
+    ALIGN_LEFT,
+    ALIGN_RIGHT,
+    ALIGNS,
+    ANIM_STYLE_LETTERS,
+    ANIM_STYLE_WAVE,
+    ANIM_STYLE_BOUNCE,
+    ANIM_STYLE_SLIDE,
+    ANIM_STYLES,
+    MATERIAL_LIQUID,
+    MATERIAL_MATTE,
+    MATERIAL_NONE,
+    Settings,
+)
 from shelf import Shelf, ShelfItem
 from spectrum_service import SpectrumService
 from spring import Spring
@@ -440,6 +454,7 @@ class MainWindow(Gtk.Window):
         self._preview_enter = Spring(1.0, 220.0, 26.0)
         self._preview_prev_alpha = Spring(0.0, 220.0, 26.0)
         self._preview_prev_text = ""
+        self._preview_text = ""
 
         self._toggles = {
             "lyrics": Toggle(Settings.lyrics),
@@ -513,7 +528,10 @@ class MainWindow(Gtk.Window):
         self._forced: Optional[View] = None
         if forced_view:
             for v in View:
-                if v.name.lower() == forced_view.lower():
+                if (
+                    v.name.lower() == forced_view.lower()
+                    or v.name.lower().replace("_", "") == forced_view.lower().replace("_", "")
+                ):
                     self._forced = v
                     break
         self._current_view: View = View.IDLE
@@ -978,7 +996,7 @@ class MainWindow(Gtk.Window):
                 way = int(math.copysign(1, leant))
 
             if way != 0 and self.media_active:
-                if way < 0:
+                if way > 0:
                     self.skipped(1)
                     self._skip_next.play()
                     self._media.next()
@@ -1543,6 +1561,26 @@ class MainWindow(Gtk.Window):
                 self.set_targets()
                 return
 
+            preview_text = (
+                self._lyric_target[0]
+                if (self._lyric_target and self._lyric_target[0].strip())
+                else (self._media.title if self._media.has_track else "Динамический остров")
+            )
+
+            box_x = px + 18.0
+            box_y = py + 42.0
+            box_w = pw - 36.0
+            box_h = 50.0
+            if box_x <= lx <= box_x + box_w and box_y <= ly <= box_y + box_h:
+                self._preview_prev_text = self._preview_text or preview_text
+                self._preview_text = preview_text
+                self._preview_prev_alpha.value = 1.0
+                self._preview_prev_alpha.target = 0.0
+                self._preview_enter.value = 0.0
+                self._preview_enter.target = 1.0
+                self.area.queue_draw()
+                return
+
             row_y_start = 108.0
             row_h = 42.0
             if px <= lx <= px + pw:
@@ -1568,7 +1606,12 @@ class MainWindow(Gtk.Window):
                         elif idx == 4:
                             Settings.lyric_lead_ahead = not Settings.lyric_lead_ahead
 
-                        self._preview_switch_time = time.monotonic() + 0.1
+                        self._preview_prev_text = self._preview_text or preview_text
+                        self._preview_text = preview_text
+                        self._preview_prev_alpha.value = 1.0
+                        self._preview_prev_alpha.target = 0.0
+                        self._preview_enter.value = 0.0
+                        self._preview_enter.target = 1.0
                         self.area.queue_draw()
                         return
 
@@ -1763,7 +1806,17 @@ class MainWindow(Gtk.Window):
             elif row_idx == 4:
                 Settings.lyric_lead_ahead = not Settings.lyric_lead_ahead
 
-            self._preview_switch_time = time.monotonic() + 0.1
+            preview_text = (
+                self._lyric_target[0]
+                if (self._lyric_target and self._lyric_target[0].strip())
+                else (self._media.title if self._media.has_track else "Динамический остров")
+            )
+            self._preview_prev_text = self._preview_text or preview_text
+            self._preview_text = preview_text
+            self._preview_prev_alpha.value = 1.0
+            self._preview_prev_alpha.target = 0.0
+            self._preview_enter.value = 0.0
+            self._preview_enter.target = 1.0
             self.area.queue_draw()
             return True
 
@@ -2112,20 +2165,12 @@ class MainWindow(Gtk.Window):
                 self._lyric_prev_target = None
 
         if self._current_view == View.TEXT_ANIM:
-            now = time.monotonic()
-            if now >= self._preview_switch_time:
-                self._preview_switch_time = now + 2.5
-                self._preview_prev_text = self._preview_lines[self._preview_idx]
-                self._preview_idx = (self._preview_idx + 1) % len(self._preview_lines)
-                self._preview_prev_alpha.value = 1.0
-                self._preview_prev_alpha.target = 0.0
-                self._preview_enter.value = 0.0
-                self._preview_enter.target = 1.0
             spd = Settings.lyric_anim_speed / 100.0
             moving |= self._preview_enter.advance(dt * spd)
             moving |= self._preview_prev_alpha.advance(dt * spd)
             moving |= self._row_list_text_anim.tick(dt)
-            moving = True
+            if self._preview_prev_alpha.value <= 0.0:
+                self._preview_prev_text = ""
 
         if self._current_view in (View.MEDIA, View.TOAST, View.MEDIA_BIG):
             bands = self._spectrum.get_bands()
@@ -3339,6 +3384,8 @@ class MainWindow(Gtk.Window):
                 has_words = self.lyrics_have_words()
                 anim_style = Settings.lyric_anim_style
                 fly_h = float(Settings.lyric_anim_height)
+                if ph <= 42.0:
+                    fly_h = min(fly_h, 11.0)
                 stagger_val = float(Settings.lyric_anim_stagger) / 100.0
 
                 prev_a = self._lyric_prev_alpha.value
@@ -4098,7 +4145,7 @@ class MainWindow(Gtk.Window):
         cr.fill()
 
         if self._timer.total > 0:
-            frac = max(0.0, min(1.0, self._timer.remaining / float(self._timer.total)))
+            frac = self._timer.share
             cr.save()
             cr.set_line_width(2.5)
             cr.set_line_cap(cairo.LINE_CAP_ROUND)
@@ -4141,7 +4188,9 @@ class MainWindow(Gtk.Window):
         cr.stroke()
 
         draw_text(cr, f"Таймер · {format_time(self._timer.total)}", px + pw - 26.0, py + 26.0, font_size=12.0, color=self._timer_tint, alpha=0.8 * alpha, align="right", valign="center")
-        self._digits_big_timer.render(cr, px + pw - 26.0, py + 62.0, font_size=40.0, color=self._timer_tint, align="right", valign="center")
+        if self._timer.active and self._digits_big_timer.text != self._timer.formatted:
+            self._digits_big_timer.set_text(self._timer.formatted)
+        self._digits_big_timer.render(cr, px + pw - 26.0, py + 62.0, font_size=40.0, color=(self._timer_tint[0], self._timer_tint[1], self._timer_tint[2], alpha), align="right", valign="center")
 
     def render_timer_set(self, cr: cairo.Context, px: float, py: float, pw: float, ph: float, alpha: float) -> None:
         draw_text(cr, "ТАЙМЕР", px + 22.0, py + 24.0, font_size=10.5, bold=True, color=COLOR_DIM[:3], alpha=0.6 * alpha, align="left", valign="center")
@@ -4220,7 +4269,7 @@ class MainWindow(Gtk.Window):
             ry = py + row_y_start + idx * row_h
             render_icon(cr, glyph, px + 22.0, ry + (row_h - 17.0) / 2.0, 17.0, COLOR_DIM[:3], alpha=alpha)
             draw_text(cr, label, px + 49.0, ry + row_h / 2.0, font_size=13.0, bold=False, color=COLOR_WHITE, alpha=alpha, align="left", valign="center")
-            self._toggles[key].render(cr, px + pw - 50.0, ry + (row_h - 22.0) / 2.0, w=38.0, h=22.0)
+            self._toggles[key].render(cr, px + pw - 58.0, ry + (row_h - 24.0) / 2.0, w=46.0, h=24.0)
 
         # Update row (index 9)
         upd_ry = py + row_y_start + len(rows) * row_h
@@ -4323,8 +4372,14 @@ class MainWindow(Gtk.Window):
         prev_x = box_x + 36.0
         prev_w = box_w - 48.0
         anim_style = Settings.lyric_anim_style
-        fly_h = float(Settings.lyric_anim_height)
+        fly_h = min(float(Settings.lyric_anim_height), 11.0)
         stagger_val = float(Settings.lyric_anim_stagger) / 100.0
+
+        preview_text = (
+            self._lyric_target[0]
+            if (self._lyric_target and self._lyric_target[0].strip())
+            else (self._media.title if self._media.has_track else "Динамический остров")
+        )
 
         prev_exit_a = self._preview_prev_alpha.value
         if prev_exit_a > 0.01 and self._preview_prev_text:
@@ -4344,7 +4399,7 @@ class MainWindow(Gtk.Window):
                 stagger=stagger_val,
             )
 
-        cur_text = self._preview_lines[self._preview_idx]
+        cur_text = self._preview_text or preview_text
         enter_val = self._preview_enter.value
         LyricLine.render_compact(
             cr,

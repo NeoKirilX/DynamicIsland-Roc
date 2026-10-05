@@ -30,6 +30,10 @@ class Countdown:
         self.resumed_at = time.monotonic()
 
     @property
+    def remaining(self) -> float:
+        return self.left
+
+    @property
     def share(self) -> float:
         if self.total > 0.0 and self.active:
             return max(0.0, min(1.0, self.left / self.total))
@@ -109,6 +113,7 @@ if __name__ == "__main__":
     assert not timer.active
     assert not timer.running
     assert timer.left == 0.0
+    assert timer.remaining == 0.0
     assert timer.share == 0.0
     assert not timer.is_urgent
     assert timer.formatted == "00:00"
