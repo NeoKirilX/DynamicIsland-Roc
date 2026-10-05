@@ -26,7 +26,9 @@ import gi
 gi.require_version("Gtk", "4.0")
 gi.require_version("Gdk", "4.0")
 gi.require_version("Gtk4LayerShell", "1.0")
-from gi.repository import Gdk, Gio, GLib, Gtk, Gtk4LayerShell
+gi.require_version("Pango", "1.0")
+gi.require_version("PangoCairo", "1.0")
+from gi.repository import Gdk, Gio, GLib, Gtk, Gtk4LayerShell, Pango, PangoCairo
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 if str(SCRIPT_DIR) not in sys.path:
@@ -49,7 +51,7 @@ from native_wayland import is_ctrl_down, is_fullscreen, query_do_not_disturb
 from network_service import Link, NetworkService, State
 from ring import Ring
 from row_list import RowList
-from settings import MATERIAL_LIQUID, MATERIAL_MATTE, MATERIAL_NONE, Settings
+from settings import ALIGN_CENTER, ALIGN_LEFT, ALIGN_RIGHT, ALIGNS, MATERIAL_LIQUID, MATERIAL_MATTE, MATERIAL_NONE, Settings
 from shelf import Shelf, ShelfItem
 from spectrum_service import SpectrumService
 from spring import Spring
@@ -81,6 +83,7 @@ class View(Enum):
     MENU = auto()
     SETTINGS = auto()
     LOOK = auto()
+    TEXT_ANIM = auto()
     SHELF = auto()
     UPDATE = auto()
 
@@ -92,6 +95,7 @@ class Panel(Enum):
     MENU = auto()
     SETTINGS = auto()
     LOOK = auto()
+    TEXT_ANIM = auto()
     SHELF = auto()
     UPDATE = auto()
 
@@ -133,6 +137,7 @@ SIZES: dict[View, Dims] = {
     View.MENU: Dims(300, 248, 34),
     View.SETTINGS: Dims(320, SETTINGS_HEIGHT, 34),
     View.LOOK: Dims(LOOK_WIDTH, LOOK_HEIGHT, 34),
+    View.TEXT_ANIM: Dims(320, 390, 34),
     View.SHELF: Dims(380, 136, 34),
     View.UPDATE: Dims(340, 230, 34),
 }
@@ -181,9 +186,9 @@ def player_lyric_font() -> float:
     return PLAYER_LYRIC_FONT * Settings.text_factor()
 LYRIC_SPEED = 36.0
 LYRIC_LEAD = 0.2
-LYRIC_LOOKAHEAD = 1.8
-LYRIC_ARM_BEFORE = 2.0
-LYRIC_DIM_ARM = 0.45
+LYRIC_LOOKAHEAD = 5.0
+LYRIC_ARM_BEFORE = 5.0
+LYRIC_DIM_ARM = 0.52
 LYRIC_ENTER_SHIFT = 7.0
 LYRIC_EXIT_SHIFT = -6.0
 COLLAPSE_DELAY_SEC = 0.55
@@ -296,6 +301,20 @@ def draw_text(
     cr.new_path()
     return ext.width
 
+def markdown_to_pango_markup(text: str) -> str:
+    escaped = (
+        text.replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+    )
+    escaped = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", escaped)
+    escaped = re.sub(r"__(.+?)__", r"<b>\1</b>", escaped)
+    escaped = re.sub(r"(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)", r"<i>\1</i>", escaped)
+    escaped = re.sub(r"(?<!_)_(?!_)(.+?)(?<!_)_(?!_)", r"<i>\1</i>", escaped)
+    escaped = re.sub(r"`(.+?)`", r"<tt>\1</tt>", escaped)
+    escaped = re.sub(r"~~(.+?)~~", r"<s>\1</s>", escaped)
+    return escaped
+
 _IMAGE_SURFACE_CACHE: dict[str, tuple[cairo.ImageSurface, bytearray]] = {}
 _MEASURE_SURFACE = cairo.ImageSurface(cairo.FORMAT_ARGB32, 1, 1)
 _MEASURE_CR = cairo.Context(_MEASURE_SURFACE)
@@ -407,6 +426,20 @@ class MainWindow(Gtk.Window):
         self._row_list_menu = RowList()
         self._row_list_settings = RowList()
         self._row_list_look = RowList()
+        self._row_list_text_anim = RowList()
+        self._update_scroll = Spring(0.0, 240.0, 28.0)
+
+        self._preview_lines = [
+            "♪ Музыка и текст",
+            "♫ Посимвольный вылет",
+            "♪ Плавная кинематика",
+            "♫ Динамический остров",
+        ]
+        self._preview_idx = 0
+        self._preview_switch_time = time.monotonic() + 2.2
+        self._preview_enter = Spring(1.0, 220.0, 26.0)
+        self._preview_prev_alpha = Spring(0.0, 220.0, 26.0)
+        self._preview_prev_text = ""
 
         self._toggles = {
             "lyrics": Toggle(Settings.lyrics),
@@ -506,6 +539,8 @@ class MainWindow(Gtk.Window):
         self._urgent = False
         self._minutes = 25
         self._click_lock_until = time.monotonic() + 0.45
+        self._dirty_rect: Optional[tuple[float, float, float, float]] = None
+        self._last_input_region_key: Any = None
 
         self._accent_color: tuple[float, float, float] = (1.0, 1.0, 1.0)
         self._timer_tint: tuple[float, float, float] = COLOR_ORANGE
@@ -871,7 +906,13 @@ class MainWindow(Gtk.Window):
         offset_y = self._offset.value + self._gap.value / size
         pill_top = offset_y * size
 
-        pill_x = -w / 2.0
+        align = Settings.align
+        if align == ALIGN_LEFT:
+            pill_x = 0.0
+        elif align == ALIGN_RIGHT:
+            pill_x = -w
+        else:
+            pill_x = -w / 2.0
         pill_y = 0.0
 
         split = self._split.value
@@ -880,17 +921,19 @@ class MainWindow(Gtk.Window):
 
         bubble_info = None
         if apart:
-            pill_right = w / 2.0
             timer_w = self._carry_timer.value * CARRY_TIMER
             shelf_w = self._carry_shelf.value * self._shelf_wide.value
             both = (self._carry_timer.value > 0.05 and self._carry_shelf.value > 0.05)
             base_bw = max(CARRY_SHELF, timer_w + shelf_w + (6.0 if both else 0.0))
             past = ((BUBBLE_GAP + base_bw) * split - base_bw) / scale
-            bx = pill_right + past
-            by = 0.0
             bw = base_bw * bubble_scale / scale
             bh = BUBBLE_HEIGHT * bubble_scale / scale
             br = bh / 2.0
+            if align == ALIGN_RIGHT:
+                bx = pill_x - past - bw
+            else:
+                bx = pill_x + w + past
+            by = 0.0
             bubble_info = (bx, by, bw, bh, br)
 
         return (pill_x, pill_y, w, h, r, bubble_info)
@@ -1104,7 +1147,7 @@ class MainWindow(Gtk.Window):
         elif self._current_view == View.LOOK:
             row_y_start, row_h, swatch_y = self.get_look_layout(ph)
             hovered = None
-            for idx in range(11):
+            for idx in range(13):
                 ry = py + row_y_start + idx * row_h
                 if px + 10 <= lx <= px + pw - 10 and ry <= ly < ry + row_h:
                     hovered = idx
@@ -1112,6 +1155,20 @@ class MainWindow(Gtk.Window):
                     break
             if hovered is None:
                 self._row_list_look.clear_hover()
+            self.area.queue_draw()
+
+        elif self._current_view == View.TEXT_ANIM:
+            row_y_start = 108.0
+            row_h = 42.0
+            hovered = None
+            for idx in range(5):
+                ry = py + row_y_start + idx * row_h
+                if px + 10 <= lx <= px + pw - 10 and ry <= ly < ry + row_h:
+                    hovered = idx
+                    self._row_list_text_anim.move_to(ry, row_h, idx)
+                    break
+            if hovered is None:
+                self._row_list_text_anim.clear_hover()
             self.area.queue_draw()
 
         elif self._current_view == View.SHELF:
@@ -1405,7 +1462,7 @@ class MainWindow(Gtk.Window):
             mod_step = self.get_modifier_step()
 
             if px <= lx <= px + pw:
-                for idx in range(11):
+                for idx in range(13):
                     ry = py + row_y_start + idx * row_h
                     if ry <= ly < ry + row_h:
                         if idx == 0:
@@ -1420,40 +1477,51 @@ class MainWindow(Gtk.Window):
                             self.set_pos_x(Settings.pos_x + mod_step)
                             return
                         elif idx == 3:
+                            aligns = [ALIGN_CENTER, ALIGN_LEFT, ALIGN_RIGHT]
+                            cur_idx = aligns.index(Settings.align) if Settings.align in aligns else 0
+                            new_align = aligns[(cur_idx + 1) % len(aligns)]
+                            self.set_align(new_align)
+                            return
+                        elif idx == 4:
+                            self.open_panel(Panel.TEXT_ANIM)
+                            self.update_view()
+                            self.set_targets()
+                            return
+                        elif idx == 5:
                             idx_r = RADII.index(Settings.radius) if Settings.radius in RADII else -1
                             new_radius = RADII[(idx_r + 1) % len(RADII)] if idx_r >= 0 else RADII[0]
                             self.set_radius(new_radius)
                             return
-                        elif idx == 4:
+                        elif idx == 6:
                             idx_h = HEIGHTS.index(Settings.height) if Settings.height in HEIGHTS else -1
                             new_h = HEIGHTS[(idx_h + 1) % len(HEIGHTS)] if idx_h >= 0 else HEIGHTS[0]
                             self.set_height(new_h)
                             return
-                        elif idx == 5:
+                        elif idx == 7:
                             idx_ts = TEXT_SCALES.index(Settings.text_scale) if Settings.text_scale in TEXT_SCALES else -1
                             new_ts = TEXT_SCALES[(idx_ts + 1) % len(TEXT_SCALES)] if idx_ts >= 0 else TEXT_SCALES[0]
                             self.set_text_scale(new_ts)
                             return
-                        elif idx == 6:
+                        elif idx == 8:
                             modes = [MATERIAL_LIQUID, MATERIAL_MATTE, MATERIAL_NONE]
                             cur_idx = modes.index(Settings.material) if Settings.material in modes else 0
                             new_mat = modes[(cur_idx + 1) % len(modes)]
                             self.set_material(new_mat)
                             return
-                        elif idx == 7:
+                        elif idx == 9:
                             idx_g = GLASS_LEVELS.index(Settings.glass) if Settings.glass in GLASS_LEVELS else -1
                             new_glass = GLASS_LEVELS[(idx_g + 1) % len(GLASS_LEVELS)] if idx_g >= 0 else GLASS_LEVELS[0]
                             self.set_glass(new_glass)
                             return
-                        elif idx == 8:
+                        elif idx == 10:
                             Settings.line_bar = not Settings.line_bar
                             self.area.queue_draw()
                             return
-                        elif idx == 9:
+                        elif idx == 11:
                             Settings.equalizer_dots = not Settings.equalizer_dots
                             self.area.queue_draw()
                             return
-                        elif idx == 10:
+                        elif idx == 12:
                             colors = [c[0] for c in LOOK_COLORS]
                             cur_idx = colors.index(Settings.accent) if Settings.accent in colors else 0
                             new_accent = colors[(cur_idx + 1) % len(colors)]
@@ -1467,6 +1535,42 @@ class MainWindow(Gtk.Window):
                 if 0 <= idx < len(LOOK_COLORS):
                     self.set_accent(LOOK_COLORS[idx][0])
                     return
+
+        if self._current_view == View.TEXT_ANIM:
+            if px <= lx <= px + 150 and py + 12 <= ly <= py + 40:
+                self.open_panel(Panel.LOOK)
+                self.update_view()
+                self.set_targets()
+                return
+
+            row_y_start = 108.0
+            row_h = 42.0
+            if px <= lx <= px + pw:
+                for idx in range(5):
+                    ry = py + row_y_start + idx * row_h
+                    if ry <= ly < ry + row_h:
+                        if idx == 0:
+                            styles = [ANIM_STYLE_LETTERS, ANIM_STYLE_WAVE, ANIM_STYLE_BOUNCE, ANIM_STYLE_SLIDE]
+                            cur = styles.index(Settings.lyric_anim_style) if Settings.lyric_anim_style in styles else 0
+                            Settings.lyric_anim_style = styles[(cur + 1) % len(styles)]
+                        elif idx == 1:
+                            speeds = [50, 75, 100, 125, 150, 200]
+                            cur = speeds.index(Settings.lyric_anim_speed) if Settings.lyric_anim_speed in speeds else 2
+                            Settings.lyric_anim_speed = speeds[(cur + 1) % len(speeds)]
+                        elif idx == 2:
+                            heights = [15, 20, 26, 32, 40]
+                            cur = heights.index(Settings.lyric_anim_height) if Settings.lyric_anim_height in heights else 2
+                            Settings.lyric_anim_height = heights[(cur + 1) % len(heights)]
+                        elif idx == 3:
+                            staggers = [15, 25, 35, 50]
+                            cur = staggers.index(Settings.lyric_anim_stagger) if Settings.lyric_anim_stagger in staggers else 1
+                            Settings.lyric_anim_stagger = staggers[(cur + 1) % len(staggers)]
+                        elif idx == 4:
+                            Settings.lyric_lead_ahead = not Settings.lyric_lead_ahead
+
+                        self._preview_switch_time = time.monotonic() + 0.1
+                        self.area.queue_draw()
+                        return
 
         if self._current_view == View.UPDATE:
             if px + 10 <= lx <= px + 150 and py + 12 <= ly <= py + 40:
@@ -1584,41 +1688,92 @@ class MainWindow(Gtk.Window):
                 self.set_pos_x(new_x)
                 return True
             elif row_idx == 3:
+                aligns = [ALIGN_CENTER, ALIGN_LEFT, ALIGN_RIGHT]
+                cur_idx = aligns.index(Settings.align) if Settings.align in aligns else 0
+                new_idx = (cur_idx + nudge) % len(aligns)
+                self.set_align(aligns[new_idx])
+                return True
+            elif row_idx == 4:
+                styles = [ANIM_STYLE_LETTERS, ANIM_STYLE_WAVE, ANIM_STYLE_BOUNCE, ANIM_STYLE_SLIDE]
+                cur = styles.index(Settings.lyric_anim_style) if Settings.lyric_anim_style in styles else 0
+                Settings.lyric_anim_style = styles[(cur + nudge) % len(styles)]
+                self.area.queue_draw()
+                return True
+            elif row_idx == 5:
                 new_radius = max(0, min(100, Settings.radius + nudge * 5))
                 self.set_radius(new_radius)
                 return True
-            elif row_idx == 4:
+            elif row_idx == 6:
                 new_h = max(0, min(16, Settings.height + nudge))
                 self.set_height(new_h)
                 return True
-            elif row_idx == 5:
+            elif row_idx == 7:
                 new_ts = max(80, min(130, Settings.text_scale + nudge * 5))
                 self.set_text_scale(new_ts)
                 return True
-            elif row_idx == 6:
+            elif row_idx == 8:
                 modes = [MATERIAL_LIQUID, MATERIAL_MATTE, MATERIAL_NONE]
                 cur_idx = modes.index(Settings.material) if Settings.material in modes else 0
                 new_idx = max(0, min(len(modes) - 1, cur_idx - nudge))
                 self.set_material(modes[new_idx])
                 return True
-            elif row_idx == 7:
+            elif row_idx == 9:
                 new_glass = max(20, min(100, Settings.glass + nudge * 5))
                 self.set_glass(new_glass)
                 return True
-            elif row_idx == 8:
+            elif row_idx == 10:
                 Settings.line_bar = not Settings.line_bar
                 self.area.queue_draw()
                 return True
-            elif row_idx == 9:
+            elif row_idx == 11:
                 Settings.equalizer_dots = not Settings.equalizer_dots
                 self.area.queue_draw()
                 return True
-            elif row_idx == 10 or ly >= py + swatch_y - 15.0:
+            elif row_idx == 12 or ly >= py + swatch_y - 15.0:
                 colors = [c[0] for c in LOOK_COLORS]
                 cur_idx = colors.index(Settings.accent) if Settings.accent in colors else 0
                 new_idx = max(0, min(len(colors) - 1, cur_idx + nudge))
                 self.set_accent(colors[new_idx])
                 return True
+
+        if self._current_view == View.TEXT_ANIM:
+            nudge = 1 if up else -1
+            row_y_start = 108.0
+            row_h = 42.0
+            row_idx = int((ly - (py + row_y_start)) / row_h)
+            if row_idx == 0:
+                styles = [ANIM_STYLE_LETTERS, ANIM_STYLE_WAVE, ANIM_STYLE_BOUNCE, ANIM_STYLE_SLIDE]
+                cur = styles.index(Settings.lyric_anim_style) if Settings.lyric_anim_style in styles else 0
+                Settings.lyric_anim_style = styles[(cur + nudge) % len(styles)]
+            elif row_idx == 1:
+                speeds = [50, 75, 100, 125, 150, 200]
+                cur = speeds.index(Settings.lyric_anim_speed) if Settings.lyric_anim_speed in speeds else 2
+                new_idx = max(0, min(len(speeds) - 1, cur + nudge))
+                Settings.lyric_anim_speed = speeds[new_idx]
+            elif row_idx == 2:
+                heights = [15, 20, 26, 32, 40]
+                cur = heights.index(Settings.lyric_anim_height) if Settings.lyric_anim_height in heights else 2
+                new_idx = max(0, min(len(heights) - 1, cur + nudge))
+                Settings.lyric_anim_height = heights[new_idx]
+            elif row_idx == 3:
+                staggers = [15, 25, 35, 50]
+                cur = staggers.index(Settings.lyric_anim_stagger) if Settings.lyric_anim_stagger in staggers else 1
+                new_idx = max(0, min(len(staggers) - 1, cur + nudge))
+                Settings.lyric_anim_stagger = staggers[new_idx]
+            elif row_idx == 4:
+                Settings.lyric_lead_ahead = not Settings.lyric_lead_ahead
+
+            self._preview_switch_time = time.monotonic() + 0.1
+            self.area.queue_draw()
+            return True
+
+        if self._current_view == View.UPDATE:
+            avail_h = max(10.0, ph - 165.0)
+            max_scroll = max(0.0, self._update_total_h - avail_h)
+            new_target = max(0.0, min(max_scroll, self._update_scroll.target - step * 28.0))
+            self._update_scroll.target = new_target
+            self.area.queue_draw()
+            return True
 
         if self._current_view == View.MEDIA_BIG and Settings.app_volume:
             app_id = self._media.source
@@ -1659,6 +1814,8 @@ class MainWindow(Gtk.Window):
                 target = View.SETTINGS
             elif self._panel == Panel.LOOK:
                 target = View.LOOK
+            elif self._panel == Panel.TEXT_ANIM:
+                target = View.TEXT_ANIM
             elif self._panel == Panel.SHELF:
                 target = View.SHELF
             elif self._panel == Panel.UPDATE:
@@ -1719,8 +1876,8 @@ class MainWindow(Gtk.Window):
     def get_look_layout(self, ph: float) -> tuple[float, float, float]:
         row_y_start = 44.0
         avail_for_rows = ph - row_y_start - 48.0
-        row_h = max(26.0, min(36.0, avail_for_rows / 11.0))
-        swatch_y = row_y_start + 11.0 * row_h + 16.0
+        row_h = max(24.0, min(36.0, avail_for_rows / 13.0))
+        swatch_y = row_y_start + 13.0 * row_h + 16.0
         return row_y_start, row_h, swatch_y
 
     @property
@@ -1881,6 +2038,7 @@ class MainWindow(Gtk.Window):
         moving |= self._bolt_spring.advance(dt)
         moving |= self._skip_prev.advance(dt)
         moving |= self._skip_next.advance(dt)
+        moving |= self._update_scroll.advance(dt)
         moving |= self._shelf.tick(dt)
         moving |= self._digits_shelf.tick(dt)
         moving |= self._digits_shelf_menu.tick(dt)
@@ -1946,11 +2104,28 @@ class MainWindow(Gtk.Window):
             moving |= self._advance_lyric_scroll(dt)
 
         if self._current_view == View.MEDIA and Settings.lyrics:
-            moving |= self._lyric_enter.advance(dt)
-            moving |= self._lyric_prev_alpha.advance(dt)
+            spd = Settings.lyric_anim_speed / 100.0
+            moving |= self._lyric_enter.advance(dt * spd)
+            moving |= self._lyric_prev_alpha.advance(dt * spd)
             if self._lyric_prev_alpha.value <= 0.0:
                 self._lyric_prev_text = ""
                 self._lyric_prev_target = None
+
+        if self._current_view == View.TEXT_ANIM:
+            now = time.monotonic()
+            if now >= self._preview_switch_time:
+                self._preview_switch_time = now + 2.5
+                self._preview_prev_text = self._preview_lines[self._preview_idx]
+                self._preview_idx = (self._preview_idx + 1) % len(self._preview_lines)
+                self._preview_prev_alpha.value = 1.0
+                self._preview_prev_alpha.target = 0.0
+                self._preview_enter.value = 0.0
+                self._preview_enter.target = 1.0
+            spd = Settings.lyric_anim_speed / 100.0
+            moving |= self._preview_enter.advance(dt * spd)
+            moving |= self._preview_prev_alpha.advance(dt * spd)
+            moving |= self._row_list_text_anim.tick(dt)
+            moving = True
 
         if self._current_view in (View.MEDIA, View.TOAST, View.MEDIA_BIG):
             bands = self._spectrum.get_bands()
@@ -2102,10 +2277,16 @@ class MainWindow(Gtk.Window):
             return
 
         if (self._hidden or self._away) and not self._ringing:
+            if self._last_input_region_key == "empty":
+                return
+            self._last_input_region_key = "empty"
             surf.set_input_region(cairo.Region())
             return
 
         if self._grab in ("pull", "lean") or self._dragging_look or self._scrubbing:
+            if self._last_input_region_key == "fullscreen":
+                return
+            self._last_input_region_key = "fullscreen"
             w_win = max(1, int(self.win_width))
             h_win = max(1, int(self.win_height))
             reg = cairo.Region(cairo.RectangleInt(0, 0, w_win, h_win))
@@ -2121,13 +2302,55 @@ class MainWindow(Gtk.Window):
         pill_top = offset_y * size
 
         if pill_top + h * scale * size <= 0:
+            if self._last_input_region_key == "empty":
+                return
+            self._last_input_region_key = "empty"
             surf.set_input_region(cairo.Region())
             return
 
-        pill_left_win = cx - (w * scale * size) / 2.0 - 2.0
+        align = Settings.align
+        if align == ALIGN_LEFT:
+            pill_left_win = cx - 2.0
+            pill_x_loc = 0.0
+        elif align == ALIGN_RIGHT:
+            pill_left_win = cx - (w * scale * size) - 2.0
+            pill_x_loc = -w
+        else:
+            pill_left_win = cx - (w * scale * size) / 2.0 - 2.0
+            pill_x_loc = -w / 2.0
+
         pill_top_win = max(0.0, pill_top - 2.0)
         pill_w_win = w * scale * size + 4.0
         pill_h_win = h * scale * size + 4.0
+
+        b_tuple = (0, 0, 0, 0)
+        has_split = self._split.value > 0.01
+        if has_split:
+            bw = BUBBLE_WIDTH * max(0.01, self._bubble_scale.value) / scale
+            bh = BUBBLE_HEIGHT * max(0.01, self._bubble_scale.value) / scale
+            if align == ALIGN_RIGHT:
+                past = ((BUBBLE_GAP + BUBBLE_WIDTH) * self._split.value - BUBBLE_WIDTH) / scale
+                bx = pill_x_loc - past - bw
+            else:
+                past = ((BUBBLE_GAP + BUBBLE_WIDTH) * self._split.value - BUBBLE_WIDTH) / scale
+                bx = pill_x_loc + w + past
+
+            b_left_win = cx + bx * scale * size - 2.0
+            b_top_win = max(0.0, pill_top - 2.0)
+            b_w_win = bw * scale * size + 4.0
+            b_h_win = bh * scale * size + 4.0
+            b_tuple = (int(b_left_win), int(b_top_win), int(math.ceil(b_w_win)), int(math.ceil(b_h_win)))
+
+        key = (
+            int(pill_left_win),
+            int(pill_top_win),
+            int(math.ceil(pill_w_win)),
+            int(math.ceil(pill_h_win)),
+            b_tuple,
+        )
+        if key == self._last_input_region_key:
+            return
+        self._last_input_region_key = key
 
         reg = cairo.Region(
             cairo.RectangleInt(
@@ -2138,23 +2361,13 @@ class MainWindow(Gtk.Window):
             )
         )
 
-        if self._split.value > 0.01:
-            pill_right = w / 2.0
-            past = ((BUBBLE_GAP + BUBBLE_WIDTH) * self._split.value - BUBBLE_WIDTH) / scale
-            bx = pill_right + past
-            bw = BUBBLE_WIDTH * max(0.01, self._bubble_scale.value) / scale
-            bh = BUBBLE_HEIGHT * max(0.01, self._bubble_scale.value) / scale
-
-            b_left_win = cx + bx * scale * size - 2.0
-            b_top_win = max(0.0, pill_top - 2.0)
-            b_w_win = bw * scale * size + 4.0
-            b_h_win = bh * scale * size + 4.0
+        if has_split:
             reg.union(
                 cairo.RectangleInt(
-                    int(b_left_win),
-                    int(b_top_win),
-                    int(math.ceil(b_w_win)),
-                    int(math.ceil(b_h_win)),
+                    b_tuple[0],
+                    b_tuple[1],
+                    b_tuple[2],
+                    b_tuple[3],
                 )
             )
 
@@ -2613,18 +2826,24 @@ class MainWindow(Gtk.Window):
     def lyric_phase(
         self,
         target: Optional[tuple[str, float, float, bool]],
-    ) -> tuple[Optional[float], float]:
+    ) -> tuple[Optional[float], float, tuple[float, float, float]]:
         if target is None:
-            return (None, 1.0)
+            return (None, 1.0, COLOR_WHITE)
         _text, start_t, end_t, started = target
         at = self._media.position + LYRIC_LEAD
         if started or at >= start_t:
             span = max(0.5, end_t - start_t)
-            return (max(0.0, min(1.0, (at - start_t) / span)), 1.0)
+            return (max(0.0, min(1.0, (at - start_t) / span)), 1.0, COLOR_WHITE)
         until = start_t - at
-        if until > LYRIC_ARM_BEFORE:
-            return (None, 1.0)
-        return (None, LYRIC_DIM_ARM)
+        if until > 2.0:
+            # > 2.0s to start (and <= 5.0s): fully pure white!
+            return (None, 1.0, COLOR_WHITE)
+        elif until > 0.0:
+            # 0.0s < until < 2.0s: smoothly transition into gray
+            factor = max(0.0, min(1.0, until / 2.0))
+            gray = 0.52 + 0.48 * factor
+            return (None, 1.0, (gray, gray, gray))
+        return (None, 1.0, (0.52, 0.52, 0.52))
 
     def _advance_lyric_scroll(self, dt: float) -> bool:
         span = self._lyric_span if self._lyric_span > 0.0 else 3.0
@@ -2760,12 +2979,21 @@ class MainWindow(Gtk.Window):
     def set_pos_x(self, px: int) -> None:
         Settings.pos_x = px
         self._pos_x.target = float(px)
+        self._dirty_rect = None
         self.set_targets()
 
     def set_pos_y(self, py: int) -> None:
         Settings.pos_y = py
         self._gap.target = float(py)
+        self._dirty_rect = None
         self.set_targets()
+
+    def set_align(self, align: str) -> None:
+        Settings.align = align
+        self._dirty_rect = None
+        self.set_targets()
+        self.update_input_region()
+        self.area.queue_draw()
 
     def set_scale(self, percent: int) -> None:
         Settings.scale = percent
@@ -2819,12 +3047,6 @@ class MainWindow(Gtk.Window):
         self.get_application().quit()
 
     def on_draw(self, area: Gtk.DrawingArea, cr: cairo.Context, width: int, height: int, user_data=None) -> None:
-        cr.save()
-        cr.set_operator(cairo.OPERATOR_CLEAR)
-        cr.paint()
-        cr.restore()
-        cr.set_operator(cairo.OPERATOR_OVER)
-
         if width > 50 and height > 50:
             if self.win_width != width or self.win_height != height:
                 self.win_width = width
@@ -2842,7 +3064,13 @@ class MainWindow(Gtk.Window):
         offset_y = self._offset.value + self._gap.value / size
         pill_top = offset_y * size
 
-        pill_x = -w / 2.0
+        align = Settings.align
+        if align == ALIGN_LEFT:
+            pill_x = 0.0
+        elif align == ALIGN_RIGHT:
+            pill_x = -w
+        else:
+            pill_x = -w / 2.0
         pill_y = 0.0
         pill_rect = (pill_x, pill_y, w, h)
 
@@ -2852,16 +3080,54 @@ class MainWindow(Gtk.Window):
 
         bubble_rect = None
         if apart:
-            pill_right = w / 2.0
             timer_w = self._carry_timer.value * CARRY_TIMER
             shelf_w = self._carry_shelf.value * self._shelf_wide.value
             both = (self._carry_timer.value > 0.05 and self._carry_shelf.value > 0.05)
             base_bw = max(CARRY_SHELF, timer_w + shelf_w + (6.0 if both else 0.0))
-            past = ((BUBBLE_GAP + base_bw) * split - base_bw) / scale
-            bx = pill_right + past
             bw = base_bw * bubble_scale / scale
             bh = BUBBLE_HEIGHT * bubble_scale / scale
+            if align == ALIGN_RIGHT:
+                past = ((BUBBLE_GAP + base_bw) * split - base_bw) / scale
+                bx = pill_x - past - bw
+            else:
+                past = ((BUBBLE_GAP + base_bw) * split - base_bw) / scale
+                bx = pill_x + w + past
             bubble_rect = (bx, 0.0, bw, bh)
+
+        eff_s = size * scale
+        b_min_x = cx + pill_x * eff_s - 18.0
+        b_max_x = cx + (pill_x + w) * eff_s + 18.0
+        b_min_y = pill_top - 18.0
+        b_max_y = pill_top + h * eff_s + 24.0
+
+        if apart and bubble_rect:
+            bx, by, bw, bh = bubble_rect
+            b_min_x = min(b_min_x, cx + bx * eff_s - 18.0)
+            b_max_x = max(b_max_x, cx + (bx + bw) * eff_s + 18.0)
+            b_max_y = max(b_max_y, pill_top + bh * eff_s + 24.0)
+
+        cur_box = (
+            max(0.0, b_min_x),
+            max(0.0, b_min_y),
+            max(0.0, b_max_x - b_min_x),
+            max(0.0, b_max_y - b_min_y),
+        )
+
+        cr.save()
+        cr.set_operator(cairo.OPERATOR_CLEAR)
+        if self._dirty_rect is None or width != self.win_width or height != self.win_height:
+            cr.paint()
+        else:
+            px0, py0, pw0, ph0 = self._dirty_rect
+            cx0 = min(px0, cur_box[0])
+            cy0 = min(py0, cur_box[1])
+            cx1 = max(px0 + pw0, cur_box[0] + cur_box[2])
+            cy1 = max(py0 + ph0, cur_box[1] + cur_box[3])
+            cr.rectangle(cx0, cy0, max(0.0, cx1 - cx0), max(0.0, cy1 - cy0))
+            cr.fill()
+        cr.restore()
+        cr.set_operator(cairo.OPERATOR_OVER)
+        self._dirty_rect = cur_box
 
         cr.save()
         cr.translate(cx, pill_top)
@@ -3026,6 +3292,8 @@ class MainWindow(Gtk.Window):
             self.render_settings(cr, px, py, pw, ph, alpha)
         elif view == View.LOOK:
             self.render_look(cr, px, py, pw, ph, alpha)
+        elif view == View.TEXT_ANIM:
+            self.render_text_anim(cr, px, py, pw, ph, alpha)
         elif view == View.SHELF:
             self.render_shelf(cr, px, py, pw, ph, alpha)
         elif view == View.UPDATE:
@@ -3069,39 +3337,52 @@ class MainWindow(Gtk.Window):
 
             if has_lyric and Settings.lyrics:
                 has_words = self.lyrics_have_words()
+                anim_style = Settings.lyric_anim_style
+                fly_h = float(Settings.lyric_anim_height)
+                stagger_val = float(Settings.lyric_anim_stagger) / 100.0
+
                 prev_a = self._lyric_prev_alpha.value
                 if prev_a > 0.01 and self._lyric_prev_text:
-                    p_prev, d_prev = self.lyric_phase(self._lyric_prev_target)
+                    p_prev, d_prev, col_prev = self.lyric_phase(self._lyric_prev_target)
+                    exit_prog = 1.0 - (prev_a / 0.6 if prev_a <= 0.6 else prev_a)
                     LyricLine.render_compact(
                         cr,
                         self._lyric_prev_text,
                         mid_x,
-                        py + LYRIC_EXIT_SHIFT * (1.0 - prev_a),
+                        py,
                         mid_w,
-                        COLOR_WHITE,
+                        col_prev,
                         font_size=compact_lyric_font(),
                         offset_x=self._lyric_scroll if self._lyric_prev_target == target else 0.0,
                         h=ph,
-                        alpha=prev_a * alpha,
+                        alpha=alpha,
                         dim=d_prev,
                         progress=p_prev if has_words else None,
+                        exit_progress=exit_prog,
+                        anim_style=anim_style,
+                        fly_height=fly_h,
+                        stagger=stagger_val,
                     )
 
                 enter = self._lyric_enter.value
-                prog, dim = self.lyric_phase(target)
+                prog, dim, text_col = self.lyric_phase(target)
                 LyricLine.render_compact(
                     cr,
                     lyric_text,
                     mid_x,
-                    py + LYRIC_ENTER_SHIFT * (1.0 - enter),
+                    py,
                     mid_w,
-                    COLOR_WHITE,
+                    text_col,
                     font_size=compact_lyric_font(),
                     offset_x=self._lyric_scroll,
                     h=ph,
-                    alpha=enter * alpha,
+                    alpha=alpha,
                     dim=dim,
                     progress=prog if has_words else None,
+                    enter_progress=enter,
+                    anim_style=anim_style,
+                    fly_height=fly_h,
+                    stagger=stagger_val,
                 )
             else:
                 draw_text(
@@ -3970,10 +4251,18 @@ class MainWindow(Gtk.Window):
         pos_x_str = f"+{Settings.pos_x} px" if Settings.pos_x > 0 else f"{Settings.pos_x} px"
         seek_style_label = "По строкам" if Settings.line_bar else "Сплошная"
         eq_style_label = "Матрица" if Settings.equalizer_dots else "Полоски"
+        align_labels = {
+            ALIGN_CENTER: "По центру",
+            ALIGN_LEFT: "Слева",
+            ALIGN_RIGHT: "Справа",
+        }
+        align_label = align_labels.get(Settings.align, "По центру")
         rows = [
             (Glyph.Size, "Размер", f"{Settings.scale}%"),
             (Glyph.Gap, "Позиция Y (Отступ)", f"{Settings.pos_y} px"),
             (Glyph.Size, "Позиция X (Смещение)", pos_x_str),
+            (Glyph.Lines, "Выравнивание", align_label),
+            (Glyph.Sparkle, "Анимация текста", "Настроить >"),
             (Glyph.Rim, "Радиус скругления", f"{Settings.radius}%"),
             (Glyph.Expand, "Высота острова", f"{Settings.height} px"),
             (Glyph.Lines, "Размер текста", f"{Settings.text_scale}%"),
@@ -4011,6 +4300,94 @@ class MainWindow(Gtk.Window):
                 cr.set_source_rgba(col[0], col[1], col[2], alpha)
             cr.fill()
 
+    def render_text_anim(self, cr: cairo.Context, px: float, py: float, pw: float, ph: float, alpha: float) -> None:
+        render_icon(cr, Glyph.Back, px + 20.0, py + 18.0, 10.0, COLOR_DIM[:3], alpha=0.6 * alpha)
+        draw_text(cr, "АНИМАЦИЯ ТЕКСТА", px + 36.0, py + 23.0, font_size=10.5, bold=True, color=COLOR_DIM[:3], alpha=0.6 * alpha, align="left", valign="center")
+
+        box_x = px + 18.0
+        box_y = py + 42.0
+        box_w = pw - 36.0
+        box_h = 50.0
+
+        draw_rounded_rect(cr, box_x, box_y, box_w, box_h, 16.0)
+        cr.set_source_rgba(0.06, 0.06, 0.08, 0.85 * alpha)
+        cr.fill()
+
+        draw_rounded_rect(cr, box_x, box_y, box_w, box_h, 16.0)
+        cr.set_source_rgba(1.0, 1.0, 1.0, 0.12 * alpha)
+        cr.set_line_width(1.0)
+        cr.stroke()
+
+        render_icon(cr, Glyph.Note, box_x + 13.0, box_y + 17.0, 16.0, self._accent_color, alpha=alpha)
+
+        prev_x = box_x + 36.0
+        prev_w = box_w - 48.0
+        anim_style = Settings.lyric_anim_style
+        fly_h = float(Settings.lyric_anim_height)
+        stagger_val = float(Settings.lyric_anim_stagger) / 100.0
+
+        prev_exit_a = self._preview_prev_alpha.value
+        if prev_exit_a > 0.01 and self._preview_prev_text:
+            LyricLine.render_compact(
+                cr,
+                self._preview_prev_text,
+                prev_x,
+                box_y + 8.0,
+                prev_w,
+                COLOR_WHITE,
+                font_size=12.5,
+                h=34.0,
+                alpha=alpha,
+                exit_progress=1.0 - prev_exit_a,
+                anim_style=anim_style,
+                fly_height=fly_h,
+                stagger=stagger_val,
+            )
+
+        cur_text = self._preview_lines[self._preview_idx]
+        enter_val = self._preview_enter.value
+        LyricLine.render_compact(
+            cr,
+            cur_text,
+            prev_x,
+            box_y + 8.0,
+            prev_w,
+            COLOR_WHITE,
+            font_size=12.5,
+            h=34.0,
+            alpha=alpha,
+            enter_progress=enter_val,
+            anim_style=anim_style,
+            fly_height=fly_h,
+            stagger=stagger_val,
+        )
+
+        self._row_list_text_anim.render_highlight(cr, w=pw - 20.0, x=px + 10.0)
+
+        style_labels = {
+            ANIM_STYLE_LETTERS: "По буквам",
+            ANIM_STYLE_WAVE: "Волна",
+            ANIM_STYLE_BOUNCE: "Пружинный",
+            ANIM_STYLE_SLIDE: "Слайд",
+        }
+        cur_style_lbl = style_labels.get(Settings.lyric_anim_style, "По буквам")
+
+        rows = [
+            (Glyph.Lines, "Стиль эффекта", cur_style_lbl),
+            (Glyph.Sparkle, "Скорость", f"{Settings.lyric_anim_speed}%"),
+            (Glyph.Expand, "Высота вылета", f"{Settings.lyric_anim_height} px"),
+            (Glyph.Pulse, "Задержка букв", f"{Settings.lyric_anim_stagger} мс"),
+            (Glyph.Clock, "Пред-показ строк", "За 5 сек" if Settings.lyric_lead_ahead else "Выкл"),
+        ]
+
+        row_y_start = 108.0
+        row_h = 42.0
+        for idx, (glyph, label, val_text) in enumerate(rows):
+            ry = py + row_y_start + idx * row_h
+            render_icon(cr, glyph, px + 22.0, ry + (row_h - 17.0) / 2.0, 17.0, COLOR_DIM[:3], alpha=alpha)
+            draw_text(cr, label, px + 49.0, ry + row_h / 2.0, font_size=13.0, bold=False, color=COLOR_WHITE, alpha=alpha, align="left", valign="center")
+            draw_text(cr, val_text, px + pw - 24.0, ry + row_h / 2.0, font_size=13.0, bold=False, color=COLOR_DIM[:3], alpha=alpha, align="right", valign="center")
+
     def render_update(self, cr: cairo.Context, px: float, py: float, pw: float, ph: float, alpha: float) -> None:
         render_icon(cr, Glyph.Back, px + 20.0, py + 18.0, 10.0, COLOR_DIM[:3], alpha=0.6 * alpha)
         draw_text(cr, "ОБНОВЛЕНИЕ", px + 36.0, py + 23.0, font_size=10.5, bold=True, color=COLOR_DIM[:3], alpha=0.6 * alpha, align="left", valign="center")
@@ -4030,10 +4407,51 @@ class MainWindow(Gtk.Window):
 
         draw_text(cr, status_text, px + 22.0, py + 84.0, font_size=12.0, color=COLOR_DIM[:3], alpha=alpha, align="left", valign="center")
 
-        ny = py + 106.0
+        ny = py + 104.0
+        btn_y = py + ph - 46.0
+        avail_h = max(20.0, btn_y - ny - 8.0)
+        content_w = pw - 44.0
+
         if self._updater.notes:
-            for i, note in enumerate(self._updater.notes[:3]):
-                draw_text(cr, f"• {note}", px + 22.0, ny + i * 20.0, font_size=11.5, color=COLOR_WHITE, alpha=0.85 * alpha, align="left", valign="center")
+            cr.save()
+            cr.rectangle(px + 20.0, ny, content_w + 4.0, avail_h)
+            cr.clip()
+
+            y_cursor = ny - self._update_scroll.value
+            total_notes_h = 0.0
+            for note in self._updater.notes:
+                layout = PangoCairo.create_layout(cr)
+                markup_text = f"• {markdown_to_pango_markup(note)}"
+                layout.set_markup(markup_text)
+                font_desc = Pango.FontDescription(f"Sans {11.5 * Settings.text_factor():.1f}")
+                layout.set_font_description(font_desc)
+                layout.set_width(int(content_w * Pango.SCALE))
+                layout.set_wrap(Pango.WrapMode.WORD_CHAR)
+
+                _, l_h = layout.get_pixel_size()
+                if y_cursor + l_h > ny and y_cursor < ny + avail_h:
+                    cr.save()
+                    cr.translate(px + 22.0, y_cursor)
+                    cr.set_source_rgba(1.0, 1.0, 1.0, 0.9 * alpha)
+                    PangoCairo.show_layout(cr, layout)
+                    cr.restore()
+
+                y_cursor += l_h + 6.0
+                total_notes_h += l_h + 6.0
+
+            self._update_total_h = total_notes_h
+            cr.restore()
+
+            if total_notes_h > avail_h:
+                sb_w = 3.0
+                sb_x = px + pw - 14.0
+                sb_track_h = avail_h
+                sb_thumb_h = max(16.0, sb_track_h * (avail_h / total_notes_h))
+                scroll_pct = max(0.0, min(1.0, self._update_scroll.value / max(1.0, total_notes_h - avail_h)))
+                sb_thumb_y = ny + (sb_track_h - sb_thumb_h) * scroll_pct
+                draw_rounded_rect(cr, sb_x, sb_thumb_y, sb_w, sb_thumb_h, 1.5)
+                cr.set_source_rgba(1.0, 1.0, 1.0, 0.35 * alpha)
+                cr.fill()
 
         btn_y = py + ph - 46.0
         btn_w = pw - 44.0

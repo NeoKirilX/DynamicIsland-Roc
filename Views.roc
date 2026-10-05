@@ -30,6 +30,7 @@ View : [
     Menu,
     Settings,
     Look,
+    TextAnim,
     Shelf,
     Update,
 ]
@@ -42,6 +43,7 @@ Panel : [
     Menu,
     Settings,
     Look,
+    TextAnim,
     Shelf,
     Update,
 ]
@@ -69,6 +71,7 @@ allViews = [
     Menu,
     Settings,
     Look,
+    TextAnim,
     Shelf,
     Update,
 ]
@@ -101,6 +104,7 @@ viewToPanel = |view|
         Menu -> Menu
         Settings -> Settings
         Look -> Look
+        TextAnim -> TextAnim
         Shelf -> Shelf
         Update -> Update
         _ -> None
@@ -114,6 +118,7 @@ panelToView = |panel|
         Menu -> Menu
         Settings -> Settings
         Look -> Look
+        TextAnim -> TextAnim
         Shelf -> Shelf
         Update -> Update
         None -> Idle
@@ -139,6 +144,7 @@ dimsForView = |view, hasLyrics|
         Menu -> { w: 300.0, h: 208.0, r: 34.0 }
         Settings -> { w: 320.0, h: 460.0, r: 34.0 }
         Look -> { w: 320.0, h: 540.0, r: 34.0 }
+        TextAnim -> { w: 320.0, h: 420.0, r: 34.0 }
         Shelf -> { w: 380.0, h: 136.0, r: 34.0 }
         Update -> { w: 340.0, h: 230.0, r: 34.0 }
 
@@ -154,6 +160,7 @@ resolveView = |{ panel, hasMedia, timerActive, isCharging, transientView }|
         Menu -> Menu
         Settings -> Settings
         Look -> Look
+        TextAnim -> TextAnim
         Shelf -> Shelf
         Update -> Update
         TimerSet -> TimerSet
@@ -174,7 +181,7 @@ resolveView = |{ panel, hasMedia, timerActive, isCharging, transientView }|
                 _ -> target
 
 expect
-    List.len allViews == 17
+    List.len allViews == 18
 
 expect
     dFocus = dimsForView Focus Bool.false

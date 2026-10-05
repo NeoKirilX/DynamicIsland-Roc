@@ -177,6 +177,115 @@ def measure_text(
     max_row_w = max((cr.text_extents(r[0]).x_advance for r in canonical_rows), default=0.0)
     return (max_row_w, rows_count * line_h)
 
+def render_staggered_text(
+    cr: cairo.Context,
+    text: str,
+    text_x: float,
+    baseline: float,
+    f_height: float,
+    r: float,
+    g: float,
+    b: float,
+    a: float,
+    exit_p: Optional[float] = None,
+    enter_p: Optional[float] = None,
+    anim_style: str = "letters",
+    fly_height: float = 26.0,
+    stagger: float = 0.35,
+) -> None:
+    if not text:
+        return
+
+    n_chars = len(text)
+    cur_x = text_x
+    advances = [cr.text_extents(ch).x_advance for ch in text]
+
+    for idx, (ch, ch_w) in enumerate(zip(text, advances)):
+        if ch.isspace():
+            cur_x += ch_w
+            continue
+
+        rel = idx / max(1, n_chars - 1)
+
+        if exit_p is not None:
+            ep = max(0.0, min(1.0, float(exit_p)))
+            if anim_style == "letters":
+                jitter = (((idx * 7 + 13) % 17) / 17.0 - 0.5) * 0.2
+                d = max(0.0, min(stagger, stagger * rel + jitter))
+                t = max(0.0, min(1.0, (ep - d) / max(0.01, 1.0 - stagger)))
+                dy = -fly_height * (t ** 1.35)
+                dx = math.sin(idx * 1.8 + 0.5) * 5.0 * t
+                rot = math.sin(idx * 2.3 + 1.1) * 0.20 * t
+                ch_alpha = a * max(0.0, 1.0 - (t ** 1.6))
+            elif anim_style == "wave":
+                d = stagger * rel
+                t = max(0.0, min(1.0, (ep - d) / max(0.01, 1.0 - stagger)))
+                dy = -fly_height * (t ** 1.25)
+                dx = 0.0
+                rot = 0.0
+                ch_alpha = a * max(0.0, 1.0 - t)
+            elif anim_style == "bounce":
+                d = stagger * (1.0 - abs(rel - 0.5) * 2.0)
+                t = max(0.0, min(1.0, (ep - d) / max(0.01, 1.0 - stagger)))
+                dy = -fly_height * math.sin(t * math.pi * 0.5)
+                dx = math.sin(idx * 2.7) * 4.0 * t
+                rot = math.sin(idx * 3.1) * 0.15 * t
+                ch_alpha = a * max(0.0, 1.0 - (t ** 2.0))
+            else:  # slide
+                dy = -fly_height * ep
+                dx = 0.0
+                rot = 0.0
+                ch_alpha = a * max(0.0, 1.0 - ep)
+        elif enter_p is not None:
+            en = max(0.0, min(1.0, float(enter_p)))
+            if anim_style == "letters":
+                jitter = (((idx * 11 + 7) % 19) / 19.0 - 0.5) * 0.18
+                d = max(0.0, min(stagger, stagger * (1.0 - rel) + jitter))
+                t = max(0.0, min(1.0, (en - d) / max(0.01, 1.0 - stagger)))
+                dy = fly_height * ((1.0 - t) ** 1.8)
+                dx = math.sin(idx * 1.5) * 4.0 * (1.0 - t)
+                rot = -math.sin(idx * 2.1) * 0.18 * (1.0 - t)
+                ch_alpha = a * min(1.0, t * 1.5)
+            elif anim_style == "wave":
+                d = stagger * rel
+                t = max(0.0, min(1.0, (en - d) / max(0.01, 1.0 - stagger)))
+                dy = fly_height * ((1.0 - t) ** 1.5)
+                dx = 0.0
+                rot = 0.0
+                ch_alpha = a * min(1.0, t * 1.3)
+            elif anim_style == "bounce":
+                d = stagger * (1.0 - abs(rel - 0.5) * 2.0)
+                t = max(0.0, min(1.0, (en - d) / max(0.01, 1.0 - stagger)))
+                dy = fly_height * math.cos(t * math.pi * 0.5)
+                dx = 0.0
+                rot = 0.0
+                ch_alpha = a * t
+            else:  # slide
+                dy = fly_height * (1.0 - en)
+                dx = 0.0
+                rot = 0.0
+                ch_alpha = a * en
+        else:
+            dy = 0.0
+            dx = 0.0
+            rot = 0.0
+            ch_alpha = a
+
+        if ch_alpha > 0.005:
+            cx = cur_x + ch_w / 2.0 + dx
+            cy = baseline - f_height / 3.0 + dy
+            cr.save()
+            cr.translate(cx, cy)
+            if abs(rot) > 0.001:
+                cr.rotate(rot)
+            cr.set_source_rgba(r, g, b, ch_alpha)
+            cr.move_to(-ch_w / 2.0, f_height / 3.0)
+            cr.show_text(ch)
+            cr.restore()
+
+        cur_x += ch_w
+
+
 class LyricLine:
 
     def __init__(
@@ -254,6 +363,11 @@ class LyricLine:
         dim: float = float(kwargs.get("dim", 1.0))
         progress: Optional[float] = kwargs.get("progress", None)
         unsung: float = float(kwargs.get("unsung", DIM))
+        exit_progress: Optional[float] = kwargs.get("exit_progress", None)
+        enter_progress: Optional[float] = kwargs.get("enter_progress", None)
+        anim_style: str = str(kwargs.get("anim_style", "letters"))
+        fly_height: float = float(kwargs.get("fly_height", 26.0))
+        stagger: float = float(kwargs.get("stagger", 0.35))
 
         if not text:
             return
@@ -292,9 +406,28 @@ class LyricLine:
         g = float(color[1])
         b = float(color[2])
         a = (float(color[3]) if len(color) > 3 else 1.0) * alpha * dim
-        cr.set_source_rgba(r, g, b, a)
-        cr.move_to(text_x, baseline)
-        cr.show_text(text)
+
+        if exit_progress is not None or (enter_progress is not None and enter_progress < 0.999):
+            render_staggered_text(
+                cr,
+                text,
+                text_x,
+                baseline,
+                f_height,
+                r,
+                g,
+                b,
+                a,
+                exit_p=exit_progress,
+                enter_p=enter_progress,
+                anim_style=anim_style,
+                fly_height=fly_height,
+                stagger=stagger,
+            )
+        else:
+            cr.set_source_rgba(r, g, b, a)
+            cr.move_to(text_x, baseline)
+            cr.show_text(text)
         cr.new_path()
         text_group = cr.pop_group()
 

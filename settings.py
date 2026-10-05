@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import threading
 from pathlib import Path
 from typing import Any, Callable, Optional, Tuple
 
@@ -39,6 +40,17 @@ MATERIAL_LIQUID = "liquid"
 MATERIAL_NONE = "none"
 MATERIALS = (MATERIAL_LIQUID, MATERIAL_MATTE, MATERIAL_NONE)
 
+ALIGN_CENTER = "center"
+ALIGN_LEFT = "left"
+ALIGN_RIGHT = "right"
+ALIGNS = (ALIGN_CENTER, ALIGN_LEFT, ALIGN_RIGHT)
+
+ANIM_STYLE_LETTERS = "letters"
+ANIM_STYLE_WAVE = "wave"
+ANIM_STYLE_BOUNCE = "bounce"
+ANIM_STYLE_SLIDE = "slide"
+ANIM_STYLES = (ANIM_STYLE_LETTERS, ANIM_STYLE_WAVE, ANIM_STYLE_BOUNCE, ANIM_STYLE_SLIDE)
+
 class _SettingsMeta(type):
 
     @property
@@ -72,6 +84,50 @@ class _SettingsMeta(type):
     @lyric_anim.setter
     def lyric_anim(cls, value: str) -> None:
         cls._set("lyric_anim", str(value))
+
+    @property
+    def lyric_anim_style(cls) -> str:
+        val = str(cls._data.get("lyric_anim_style", ANIM_STYLE_LETTERS)).lower()
+        return val if val in ANIM_STYLES else ANIM_STYLE_LETTERS
+
+    @lyric_anim_style.setter
+    def lyric_anim_style(cls, value: str) -> None:
+        val = str(value).lower()
+        if val not in ANIM_STYLES:
+            val = ANIM_STYLE_LETTERS
+        cls._set("lyric_anim_style", val)
+
+    @property
+    def lyric_anim_speed(cls) -> int:
+        return max(50, min(200, cls._get_int("lyric_anim_speed", 100)))
+
+    @lyric_anim_speed.setter
+    def lyric_anim_speed(cls, value: int) -> None:
+        cls._set("lyric_anim_speed", max(50, min(200, int(value))))
+
+    @property
+    def lyric_anim_stagger(cls) -> int:
+        return max(10, min(60, cls._get_int("lyric_anim_stagger", 25)))
+
+    @lyric_anim_stagger.setter
+    def lyric_anim_stagger(cls, value: int) -> None:
+        cls._set("lyric_anim_stagger", max(10, min(60, int(value))))
+
+    @property
+    def lyric_anim_height(cls) -> int:
+        return max(10, min(50, cls._get_int("lyric_anim_height", 26)))
+
+    @lyric_anim_height.setter
+    def lyric_anim_height(cls, value: int) -> None:
+        cls._set("lyric_anim_height", max(10, min(50, int(value))))
+
+    @property
+    def lyric_lead_ahead(cls) -> bool:
+        return cls._get_bool("lyric_lead_ahead", True)
+
+    @lyric_lead_ahead.setter
+    def lyric_lead_ahead(cls, value: bool) -> None:
+        cls._set("lyric_lead_ahead", bool(value))
 
     @property
     def LyricEffects(cls) -> bool:
@@ -253,6 +309,25 @@ class _SettingsMeta(type):
         val = int(value)
         cls._set("pos_y", val)
         cls._set("gap", max(0, val))
+
+    @property
+    def align(cls) -> str:
+        return cls._get_str("align", ALIGN_CENTER)
+
+    @align.setter
+    def align(cls, value: str) -> None:
+        val = str(value).lower()
+        if val not in ALIGNS:
+            val = ALIGN_CENTER
+        cls._set("align", val)
+
+    @property
+    def Align(cls) -> str:
+        return cls.align
+
+    @Align.setter
+    def Align(cls, value: str) -> None:
+        cls.align = value
 
     @property
     def Gap(cls) -> int:
@@ -439,13 +514,34 @@ class Settings(metaclass=_SettingsMeta):
             cls._data = {}
         cls._loaded = True
 
+    _save_timer: Optional[threading.Timer] = None
+    _save_lock = threading.Lock()
+
     @classmethod
-    def save(cls) -> None:
+    def save(cls, debounce: bool = True) -> None:
+        if not debounce:
+            cls.save_now()
+            return
+
+        with cls._save_lock:
+            if cls._save_timer is not None:
+                cls._save_timer.cancel()
+            cls._save_timer = threading.Timer(0.35, cls.save_now)
+            cls._save_timer.daemon = True
+            cls._save_timer.start()
+
+    @classmethod
+    def save_now(cls) -> None:
+        with cls._save_lock:
+            if cls._save_timer is not None:
+                cls._save_timer.cancel()
+                cls._save_timer = None
+            data_to_write = dict(cls._data)
         try:
             CONFIG_DIR.mkdir(parents=True, exist_ok=True)
             tmp_file = CONFIG_FILE.with_suffix(".tmp")
             with open(tmp_file, "w", encoding="utf-8") as f:
-                json.dump(cls._data, f, indent=2)
+                json.dump(data_to_write, f, indent=2)
             tmp_file.replace(CONFIG_FILE)
         except Exception as e:
             logger.error("Failed saving settings to %s: %s", CONFIG_FILE, e)
@@ -488,7 +584,7 @@ class Settings(metaclass=_SettingsMeta):
         if cls._data.get(key) == value:
             return
         cls._data[key] = value
-        cls.save()
+        cls.save(debounce=True)
         for listener in list(cls._listeners):
             try:
                 listener(key, value)

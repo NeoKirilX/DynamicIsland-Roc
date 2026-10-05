@@ -33,6 +33,24 @@ MIN_MUSIC_DURATION: float = 30.0
 DEFAULT_PALETTE: list[tuple[float, float, float]] = [(1.0, 1.0, 1.0)]
 DEFAULT_ACCENT: tuple[float, float, float] = (1.0, 1.0, 1.0)
 
+def crop_to_square(img_path: Path) -> None:
+    if Image is None or not img_path.exists():
+        return
+    try:
+        with Image.open(img_path) as im:
+            w, h = im.size
+            if w == h:
+                return
+            min_dim = min(w, h)
+            left = (w - min_dim) // 2
+            top = (h - min_dim) // 2
+            right = left + min_dim
+            bottom = top + min_dim
+            cropped = im.crop((left, top, right, bottom))
+            cropped.save(img_path, format="JPEG", quality=92)
+    except Exception as e:
+        logger.debug("Crop to square failed for %s: %s", img_path, e)
+
 def turn_hue(rgb: tuple[float, float, float], degrees: float) -> tuple[float, float, float]:
     r, g, b = rgb
     h, lum, s = colorsys.rgb_to_hls(r, g, b)
@@ -1000,25 +1018,29 @@ class MediaService:
             logger.debug("Failed processing art URL %s: %s", art_url, e)
         return None
 
-    def _async_download_cover(self, url: str, target_path: Path) -> None:
+    def _async_download_cover(self, url: str, target_path: Path, session: Optional[PlayerSession] = None) -> None:
         try:
             req = urllib.request.Request(
                 url,
                 headers={"User-Agent": "DynamicIsland/1.0 (Linux Wayland MPRIS)"},
             )
-            with urllib.request.urlopen(req, timeout=5.0) as resp:
+            with urllib.request.urlopen(req, timeout=8.0) as resp:
                 data = resp.read()
             with open(target_path, "wb") as f:
                 f.write(data)
 
+            crop_to_square(target_path)
+
             with self._lock:
+                if session is not None:
+                    session.art_path = str(target_path)
                 for s in self._players.values():
                     if s.art_url == url:
                         s.art_path = str(target_path)
-                if self._art_url == url or not self._art_path:
+                if (session is not None and self._current_player == session.bus_name) or self._art_url == url or not self._art_path:
                     self._art_path = str(target_path)
                     self._palette, self._accent = extract_dominant_palette(target_path)
-                    self._notify_changed()
+                    GLib.idle_add(self._notify_changed)
         except Exception as e:
             logger.debug("Async cover download failed for %s: %s", url, e)
 
@@ -1034,12 +1056,13 @@ class MediaService:
         cached_file = COVER_CACHE_DIR / f"ytdlp_{url_hash}.jpg"
 
         if cached_file.exists() and cached_file.stat().st_size > 0:
+            crop_to_square(cached_file)
             with self._lock:
                 session.art_path = str(cached_file)
                 if self._current_player == session.bus_name or not self._art_path:
                     self._art_path = str(cached_file)
                     self._palette, self._accent = extract_dominant_palette(cached_file)
-                    self._notify_changed()
+                    GLib.idle_add(self._notify_changed)
             return
 
         def worker():
@@ -1051,7 +1074,7 @@ class MediaService:
                         ["yt-dlp", "--get-thumbnail", "--no-warnings", target],
                         capture_output=True,
                         text=True,
-                        timeout=6.0,
+                        timeout=9.0,
                         check=False,
                     )
                     if res.returncode == 0 and res.stdout.strip():
@@ -1068,7 +1091,7 @@ class MediaService:
                         "skip_download": True,
                         "extract_flat": True,
                         "noplaylist": True,
-                        "socket_timeout": 6,
+                        "socket_timeout": 8,
                     }
                     target = track_url if (track_url and track_url.startswith("http")) else f"ytsearch1:{query_key}"
                     with ytdlp_mod.YoutubeDL(ydl_opts) as ydl:
@@ -1086,7 +1109,7 @@ class MediaService:
                     logger.debug("yt_dlp python module query failed for %s: %s", query_key, e)
 
             if thumb_url:
-                self._async_download_cover(thumb_url, cached_file)
+                self._async_download_cover(thumb_url, cached_file, session=session)
 
         threading.Thread(target=worker, daemon=True).start()
 

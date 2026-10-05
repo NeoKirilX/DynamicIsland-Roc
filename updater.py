@@ -43,6 +43,7 @@ class Updater:
         self.latest_version: str = CURRENT_VERSION
         self.state: str = UpdateState.IDLE
         self.notes: list[str] = []
+        self.changelog: str = ""
         self.download_url: str = ""
         self.percent: float = 0.0
         self.error_message: str = ""
@@ -100,7 +101,8 @@ class Updater:
 
                 with self._lock:
                     self.latest_version = tag or self.current_version
-                    self.notes = notes[:6]
+                    self.changelog = body
+                    self.notes = notes
                     self.download_url = download_url
                     if self._is_newer(self.latest_version, self.current_version):
                         self.state = UpdateState.AVAILABLE

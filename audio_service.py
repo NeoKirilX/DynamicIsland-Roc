@@ -165,7 +165,7 @@ class AudioService:
             if not self._running:
                 break
 
-            time.sleep(0.04)
+            time.sleep(0.01)
             self._apply_event.clear()
 
             with self._lock:
@@ -741,10 +741,9 @@ class AudioService:
                         if "sink-input" in line_lower:
                             with self._lock:
                                 self._last_app_streams_time = 0.0
-                        elif "sink" in line_lower or "server" in line_lower or "card" in line_lower:
-                            time.sleep(0.05)
+                        elif "server" in line_lower or "card" in line_lower or ("sink" in line_lower and ("'new'" in line_lower or "'remove'" in line_lower)):
                             self._check_device_switch()
-
+                        elif "sink" in line_lower:
                             now = time.monotonic()
                             with self._lock:
                                 has_pending = (self._pending_volume is not None or self._pending_mute is not None)

@@ -20,7 +20,7 @@ import cairo
 
 def test_views():
     print("=" * 60)
-    print("Testing DynamicIsland MainWindow and 16 Island Views...")
+    print("Testing DynamicIsland MainWindow and 17 Island Views...")
     print("=" * 60)
 
     app = Gtk.Application(
@@ -44,6 +44,7 @@ def test_views():
         "Menu",
         "Settings",
         "Look",
+        "TextAnim",
         "Shelf",
         "Update",
     ]
@@ -66,7 +67,7 @@ def test_views():
             win.destroy()
             print("OK!")
 
-        print("\nAll 16 views rendered successfully without errors!")
+        print("\nAll 17 views rendered successfully without errors!")
 
         print("\nTesting interactive panel transitions and clicks...")
         win = MainWindow(application)
@@ -100,6 +101,12 @@ def test_views():
         assert win._panel == Panel.LOOK
         assert win._current_view == View.LOOK
         print("  Panel.LOOK opened successfully ->", win._current_view)
+
+        win.open_panel(Panel.TEXT_ANIM)
+        win.update_view()
+        assert win._panel == Panel.TEXT_ANIM
+        assert win._current_view == View.TEXT_ANIM
+        print("  Panel.TEXT_ANIM opened successfully ->", win._current_view)
 
         win.open_panel(Panel.SHELF)
         win.update_view()
