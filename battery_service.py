@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 import glob
 import logging
 import os
@@ -16,6 +17,16 @@ logger = logging.getLogger(__name__)
 
 LOW_BATTERY_THRESHOLD: int = 20
 CRITICAL_BATTERY_THRESHOLD: int = 10
+
+@dataclass(frozen=True)
+class BatteryInfo:
+    has_battery: bool
+    percent: int
+    is_plugged: bool
+    status: str
+    status_text: str
+    color: tuple[float, float, float]
+    sound: str
 
 UP_DEVICE_KIND_UNKNOWN = 0
 UP_DEVICE_KIND_LINE_POWER = 1
@@ -198,6 +209,57 @@ def get_power_status() -> tuple[bool, int, bool]:
 
 def try_get_battery() -> tuple[bool, int, bool]:
     return get_power_status()
+
+def get_battery_info() -> BatteryInfo:
+    has_bat, percent, is_plugged = get_power_status()
+    if not has_bat:
+        return BatteryInfo(
+            has_battery=False,
+            percent=100,
+            is_plugged=True,
+            status="full",
+            status_text="От сети",
+            color=(0.19, 0.82, 0.35),
+            sound="",
+        )
+
+    if is_plugged:
+        if percent >= 100:
+            status = "full"
+            status_text = "Заряжена (100%)"
+            color = (0.20, 0.84, 0.29)
+            sound = "battery_full"
+        else:
+            status = "charging"
+            status_text = "Заряжается"
+            color = (0.19, 0.82, 0.35)
+            sound = "charging"
+    else:
+        if percent <= CRITICAL_BATTERY_THRESHOLD:
+            status = "critical"
+            status_text = "Батарея разряжена"
+            color = (1.0, 0.27, 0.23)
+            sound = "battery_critical"
+        elif percent <= LOW_BATTERY_THRESHOLD:
+            status = "low"
+            status_text = "Низкий заряд"
+            color = (1.0, 0.58, 0.0)
+            sound = "battery_low"
+        else:
+            status = "discharging"
+            status_text = "От батареи"
+            color = (0.95, 0.95, 0.95)
+            sound = "unplugged"
+
+    return BatteryInfo(
+        has_battery=True,
+        percent=percent,
+        is_plugged=is_plugged,
+        status=status,
+        status_text=status_text,
+        color=color,
+        sound=sound,
+    )
 
 class BatteryService:
 

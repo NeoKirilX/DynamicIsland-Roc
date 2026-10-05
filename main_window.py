@@ -34,7 +34,8 @@ if str(SCRIPT_DIR) not in sys.path:
 
 from alarm import Alarm
 from audio_service import AudioService
-from battery_service import get_power_status
+from battery_service import get_power_status, get_battery_info, BatteryInfo
+from sound_service import play_sound
 from cover import Cover
 from digits import Digits
 from equalizer import Equalizer
@@ -520,9 +521,14 @@ class MainWindow(Gtk.Window):
 
         self._last_volume = -1.0
         self._last_muted = False
-        self._last_plugged = False
+        bat_info = get_battery_info()
+        self._last_plugged = bat_info.is_plugged
         self._battery_known = False
-        self._battery_pct = 100
+        self._battery_pct = bat_info.percent
+        self._battery_status = bat_info.status_text
+        self._battery_color = bat_info.color
+        self._bolt_spring = Spring(1.0 if bat_info.is_plugged else 0.0)
+        self._bolt_spring.tune(320, 20)
         self._headset_pct = -1
         self._last_playing_time: float = 0.0
         self._clock_time_str = "00:00"
@@ -1851,6 +1857,7 @@ class MainWindow(Gtk.Window):
         moving |= self._focus_scale.advance(dt)
         moving |= self._lean.advance(dt)
         moving |= self._cover_scale.advance(dt)
+        moving |= self._bolt_spring.advance(dt)
         moving |= self._skip_prev.advance(dt)
         moving |= self._skip_next.advance(dt)
         moving |= self._shelf.tick(dt)
@@ -2198,14 +2205,41 @@ class MainWindow(Gtk.Window):
         self.area.queue_draw()
 
     def poll_power(self) -> None:
-        has_bat, percent, plugged = get_power_status()
-        if not has_bat:
+        info = get_battery_info()
+        if not info.has_battery:
             return
-        self._battery_pct = percent
-        if self._battery_known and plugged and not self._last_plugged:
-            self.show_transient(View.CHARGE, 3.0)
+
+        was_plugged = self._last_plugged
+        was_pct = self._battery_pct
+        was_known = self._battery_known
+
+        self._battery_pct = info.percent
+        self._battery_status = info.status_text
+        self._battery_color = info.color
+        self._digits_charge.set_text(f"{info.percent}%")
+        self._digits_info_battery.set_text(f"{info.percent}%")
+
+        if was_known:
+            if info.is_plugged and not was_plugged:
+                play_sound("charging")
+                self._bolt_spring.value = 0.0
+                self._bolt_spring.target = 1.0
+                self.show_transient(View.CHARGE, 3.0)
+            elif not info.is_plugged and was_plugged:
+                play_sound("unplugged")
+                self.show_transient(View.CHARGE, 2.0)
+            elif info.is_plugged and info.percent >= 100 and was_pct < 100:
+                play_sound("battery_full")
+                self.notify(Glyph.Bolt, (0.20, 0.84, 0.29), "Батарея", "Полностью заряжена · 100%", seconds=3.5)
+            elif not info.is_plugged and was_pct > 20 and info.percent <= 20:
+                play_sound("battery_low")
+                self.notify(Glyph.Battery, (1.0, 0.58, 0.0), "Низкий заряд", f"Осталось {info.percent}%", seconds=4.0)
+            elif not info.is_plugged and was_pct > 10 and info.percent <= 10:
+                play_sound("battery_critical")
+                self.notify(Glyph.Battery, (1.0, 0.27, 0.23), "Батарея разряжена", f"Срочно подключите питание ({info.percent}%)", seconds=5.0)
+
         self._battery_known = True
-        self._last_plugged = plugged
+        self._last_plugged = info.is_plugged
 
     def read_headset(self, device: Optional[Any] = None, announce: bool = False) -> None:
         level = get_headset_charge()
@@ -3118,10 +3152,30 @@ class MainWindow(Gtk.Window):
         )
 
     def render_charge(self, cr: cairo.Context, px: float, py: float, pw: float, ph: float, alpha: float) -> None:
+        col = self._battery_color
+        status_txt = self._battery_status
+
+        if self._last_plugged:
+            bolt_scale = 0.7 + 0.3 * max(0.0, min(1.0, self._bolt_spring.value))
+            icon_cx = px + 22.0
+            icon_cy = py + ph / 2.0
+            cr.save()
+            cr.translate(icon_cx, icon_cy)
+            cr.scale(bolt_scale, bolt_scale)
+            cr.translate(-icon_cx, -icon_cy)
+            render_icon(cr, Glyph.Bolt, icon_cx - 9.0, icon_cy - 9.0, 18.0, col, alpha=alpha)
+            cr.restore()
+            text_x = px + 38.0
+        else:
+            icon_cx = px + 22.0
+            icon_cy = py + ph / 2.0
+            render_icon(cr, Glyph.Battery, icon_cx - 9.0, icon_cy - 9.0, 18.0, col, alpha=alpha)
+            text_x = px + 38.0
+
         draw_text(
             cr,
-            "Зарядка",
-            px + 16.0,
+            status_txt,
+            text_x,
             py + ph / 2.0,
             font_size=13.0,
             bold=True,
@@ -3134,14 +3188,14 @@ class MainWindow(Gtk.Window):
         self._digits_charge.set_text(bat_str)
         self._digits_charge.render(
             cr,
-            px + pw - 20.0,
+            px + pw - 46.0,
             py + ph / 2.0,
             font_size=13.0,
-            color=(COLOR_GREEN[0], COLOR_GREEN[1], COLOR_GREEN[2], alpha),
+            color=(col[0], col[1], col[2], alpha),
             align="right",
             valign="center",
         )
-        bx = px + pw - 42.0
+        bx = px + pw - 38.0
         by = py + (ph - 13.0) / 2.0
         draw_rounded_rect(cr, bx, by, 24.0, 13.0, 4.0)
         cr.set_source_rgba(1.0, 1.0, 1.0, 0.4 * alpha)
@@ -3151,7 +3205,7 @@ class MainWindow(Gtk.Window):
         fill_w = 20.0 * (self._battery_pct / 100.0)
         if fill_w > 0.5:
             draw_rounded_rect(cr, bx + 2.0, by + 2.0, fill_w, 9.0, 2.5)
-            cr.set_source_rgba(COLOR_GREEN[0], COLOR_GREEN[1], COLOR_GREEN[2], alpha)
+            cr.set_source_rgba(col[0], col[1], col[2], alpha)
             cr.fill()
 
         draw_rounded_rect(cr, bx + 24.0, by + 4.0, 2.0, 5.0, 1.0)
