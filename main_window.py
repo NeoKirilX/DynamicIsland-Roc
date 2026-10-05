@@ -388,6 +388,19 @@ class MainWindow(Gtk.Window):
         self._digits_big_timer = Digits("25:00", down=True)
         self._digits_setup = Digits("25:00", down=True)
         self._digits_volume = Digits("0", down=True)
+        self._digits_shelf = Digits("0", down=True)
+        self._digits_shelf_menu = Digits("0", down=True)
+        self._digits_clock = Digits("00:00", down=True)
+        self._digits_big_clock = Digits("00:00", down=True)
+        self._digits_charge = Digits("100%", down=True)
+        self._digits_info_vol = Digits("0%", down=True)
+        self._digits_info_headset = Digits("0%", down=True)
+        self._digits_info_battery = Digits("100%", down=True)
+        self._digits_pos = Digits("0:00", down=False)
+        self._digits_rem = Digits("-0:00", down=True)
+        self._digits_player_vol = Digits("100%", down=True)
+        self._digits_player_headset = Digits("100%", down=True)
+        self._digits_menu_timer = Digits("25:00", down=True)
         self._row_list_menu = RowList()
         self._row_list_settings = RowList()
         self._row_list_look = RowList()
@@ -602,17 +615,10 @@ class MainWindow(Gtk.Window):
     def is_click_locked(self) -> bool:
         if not Settings.click_lock:
             return False
-        # Never lock clicks inside settings, appearance, menu, or shelf panels
-        if self._panel in (Panel.SETTINGS, Panel.LOOK, Panel.MENU, Panel.SHELF):
+        if self._panel != Panel.PLAYER or self._current_view != View.MEDIA_BIG:
             return False
         now = time.monotonic()
-        if now < self._click_lock_until:
-            return True
-        if abs(self._w.velocity) > 60.0 or abs(self._h.velocity) > 60.0:
-            return True
-        if self._view_transition < 0.75 and self._previous_view != self._current_view:
-            return True
-        return False
+        return now < self._click_lock_until
 
     def _setup_controllers(self) -> None:
         motion = Gtk.EventControllerMotion()
@@ -948,6 +954,30 @@ class MainWindow(Gtk.Window):
             self.set_targets()
             return
 
+        if grab in ("held", "none"):
+            if self._ringing:
+                self.quiet_alarm()
+                self.open_panel(Panel.NONE)
+            elif self._panel != Panel.NONE:
+                self.open_panel(Panel.NONE)
+            else:
+                self.open_panel(Panel.PLAYER if (self.media_active or not self._timer.active) else Panel.TIMER)
+            self.update_view()
+            self.set_targets()
+            return
+
+    def _cancel_grab(self) -> None:
+        if self._grab == "none":
+            return
+        self._grab = "none"
+        self._pull_by = 0.0
+        self._lean_by = 0.0
+        self._lean.target = 0.0
+        self._pressed = False
+        self._dragging_look = False
+        self._scrubbing = False
+        self.set_targets()
+
     def on_mouse_leave(self, controller: Gtk.EventControllerMotion) -> None:
         self._hover = False
         self._bubble_hover = False
@@ -956,7 +986,7 @@ class MainWindow(Gtk.Window):
         self._row_list_settings.clear_hover()
         self._row_list_look.clear_hover()
         if self._grab != "none":
-            self._finish_grab(self._mouse_x, self._mouse_y)
+            self._cancel_grab()
         else:
             self._pressed = False
         self.set_targets()
@@ -975,12 +1005,7 @@ class MainWindow(Gtk.Window):
                 except Exception:
                     pass
             if state and not (state & Gdk.ModifierType.BUTTON1_MASK):
-                if self._grab != "none":
-                    self._finish_grab(x, y)
-                self._pressed = False
-                self._dragging_look = False
-                self._scrubbing = False
-                self.set_targets()
+                self._cancel_grab()
                 return
 
         if self._dragging_look and self._current_view == View.LOOK:
@@ -1011,19 +1036,21 @@ class MainWindow(Gtk.Window):
             now = time.monotonic()
             dt = now - self._grab_at
             if dt >= 0.004:
-                inst_vx = (lx - self._grab_last[0]) / dt
-                inst_vy = (ly - self._grab_last[1]) / dt
+                inst_vx = (x - self._grab_last[0]) / dt
+                inst_vy = (y - self._grab_last[1]) / dt
                 decay = 1.0 - math.exp(-dt / 0.03)
                 self._grab_pace_x += (inst_vx - self._grab_pace_x) * decay
                 self._grab_pace_y += (inst_vy - self._grab_pace_y) * decay
-                self._grab_last = (lx, ly)
+                self._grab_last = (x, y)
                 self._grab_at = now
 
-            dx = lx - self._grab_from[0]
-            dy = ly - self._grab_from[1]
+            dx = x - self._grab_from[0]
+            dy = y - self._grab_from[1]
             if self._grab == "held":
-                if abs(dx) >= 5.0 or abs(dy) >= 5.0:
-                    self._grab = "lean" if abs(dx) > abs(dy) else "pull"
+                if abs(dx) < 6.0 and abs(dy) < 6.0:
+                    return
+                self._grab = "lean" if abs(dx) > abs(dy) else "pull"
+                self.update_input_region()
 
             if self._grab == "pull":
                 self._pull_by = max(0.0, dy)
@@ -1145,8 +1172,8 @@ class MainWindow(Gtk.Window):
 
             if self._panel == Panel.NONE and not self._ringing:
                 self._grab = "held"
-                self._grab_from = (lx, ly)
-                self._grab_last = (lx, ly)
+                self._grab_from = (x, y)
+                self._grab_last = (x, y)
                 self._grab_at = time.monotonic()
                 self._grab_pace_x = 0.0
                 self._grab_pace_y = 0.0
@@ -1913,6 +1940,17 @@ class MainWindow(Gtk.Window):
         moving |= self._digits_big_timer.tick(dt)
         moving |= self._digits_setup.tick(dt)
         moving |= self._digits_volume.tick(dt)
+        moving |= self._digits_clock.tick(dt)
+        moving |= self._digits_big_clock.tick(dt)
+        moving |= self._digits_charge.tick(dt)
+        moving |= self._digits_info_vol.tick(dt)
+        moving |= self._digits_info_headset.tick(dt)
+        moving |= self._digits_info_battery.tick(dt)
+        moving |= self._digits_pos.tick(dt)
+        moving |= self._digits_rem.tick(dt)
+        moving |= self._digits_player_vol.tick(dt)
+        moving |= self._digits_player_headset.tick(dt)
+        moving |= self._digits_menu_timer.tick(dt)
         moving |= self._row_list_menu.tick(dt)
         moving |= self._row_list_settings.tick(dt)
         moving |= self._row_list_look.tick(dt)
@@ -2035,7 +2073,11 @@ class MainWindow(Gtk.Window):
         if not surf:
             return
 
-        if self._grab != "none" or self._pressed or self._dragging_look or self._scrubbing:
+        if (self._hidden or self._away) and not self._ringing:
+            surf.set_input_region(cairo.Region())
+            return
+
+        if self._grab in ("pull", "lean") or self._dragging_look or self._scrubbing:
             w_win = max(1, int(self.win_width))
             h_win = max(1, int(self.win_height))
             reg = cairo.Region(cairo.RectangleInt(0, 0, w_win, h_win))
@@ -2049,6 +2091,10 @@ class MainWindow(Gtk.Window):
         cx = self.win_width / 2.0 + self._pos_x.value
         offset_y = self._offset.value + self._gap.value / size
         pill_top = offset_y * size
+
+        if pill_top + h * scale * size <= 0:
+            surf.set_input_region(cairo.Region())
+            return
 
         pill_left_win = cx - (w * scale * size) / 2.0 - 2.0
         pill_top_win = max(0.0, pill_top - 2.0)
@@ -2095,6 +2141,8 @@ class MainWindow(Gtk.Window):
     def update_clock(self) -> None:
         now = datetime.datetime.now()
         self._clock_time_str = now.strftime("%H:%M")
+        self._digits_clock.set_text(self._clock_time_str)
+        self._digits_big_clock.set_text(self._clock_time_str)
         days = ["понедельник", "вторник", "среда", "четверг", "пятница", "суббота", "воскресенье"]
         months = [
             "января", "февраля", "марта", "апреля", "мая", "июня",
@@ -2929,15 +2977,12 @@ class MainWindow(Gtk.Window):
             self.render_update(cr, px, py, pw, ph, alpha)
 
     def render_idle(self, cr: cairo.Context, px: float, py: float, pw: float, ph: float, alpha: float) -> None:
-        draw_text(
+        self._digits_clock.render(
             cr,
-            self._clock_time_str,
             px + pw / 2.0,
             py + ph / 2.0,
             font_size=13.5,
-            bold=True,
-            color=COLOR_WHITE,
-            alpha=alpha,
+            color=(1.0, 1.0, 1.0, alpha),
             align="center",
             valign="center",
         )
@@ -3086,15 +3131,13 @@ class MainWindow(Gtk.Window):
             valign="center",
         )
         bat_str = f"{self._battery_pct}%"
-        draw_text(
+        self._digits_charge.set_text(bat_str)
+        self._digits_charge.render(
             cr,
-            bat_str,
-            px + pw - 48.0,
+            px + pw - 20.0,
             py + ph / 2.0,
             font_size=13.0,
-            bold=True,
-            color=COLOR_GREEN,
-            alpha=alpha,
+            color=(COLOR_GREEN[0], COLOR_GREEN[1], COLOR_GREEN[2], alpha),
             align="right",
             valign="center",
         )
@@ -3485,9 +3528,10 @@ class MainWindow(Gtk.Window):
         dur = self._media.duration
         known_dur = dur >= 1.0
         pos = dur * (self._seek_x.value / SEEK_TRACK) if known_dur else 0.0
-
+        pos_str = format_time(pos) if known_dur else "0:00"
+        self._digits_pos.set_text(pos_str)
         seek_y = py + ph - 70.0
-        draw_text(cr, format_time(pos) if known_dur else "0:00", px + 20.0, seek_y + 3.0, font_size=11.0, color=COLOR_DIM[:3], alpha=alpha, align="left", valign="center")
+        self._digits_pos.render(cr, px + 20.0, seek_y + 3.0, font_size=11.0, color=(COLOR_DIM[0], COLOR_DIM[1], COLOR_DIM[2], alpha), align="left", valign="center")
         seek_w = SEEK_TRACK
         seek_x = px + 60.0
         seek_h = max(2.0, self._seek_h.value)
@@ -3511,7 +3555,9 @@ class MainWindow(Gtk.Window):
                 cr.fill()
 
         rem = max(0.0, dur - pos) if known_dur else 0.0
-        draw_text(cr, f"-{format_time(rem)}" if known_dur else "-0:00", px + pw - 20.0, seek_y + 3.0, font_size=11.0, color=COLOR_DIM[:3], alpha=alpha, align="right", valign="center")
+        rem_str = f"-{format_time(rem)}" if known_dur else "-0:00"
+        self._digits_rem.set_text(rem_str)
+        self._digits_rem.render(cr, px + pw - 20.0, seek_y + 3.0, font_size=11.0, color=(COLOR_DIM[0], COLOR_DIM[1], COLOR_DIM[2], alpha), align="right", valign="center")
 
         btn_y = py + ph - 42.0
 
@@ -3541,15 +3587,15 @@ class MainWindow(Gtk.Window):
 
         if self._headset_pct >= 0:
             render_icon(cr, Glyph.Headphones, px + pw - 60.0, btn_y - 7.0, 14.0, COLOR_DIM[:3], alpha=alpha)
-            draw_text(cr, f"{self._headset_pct}%", px + pw - 42.0, btn_y, font_size=11.0, color=COLOR_DIM[:3], alpha=alpha, align="left", valign="center")
+            self._digits_player_headset.render(cr, px + pw - 42.0, btn_y, font_size=11.0, color=(COLOR_DIM[0], COLOR_DIM[1], COLOR_DIM[2], alpha), align="left", valign="center")
 
         if self._player_vol_opacity > 0.01:
             eff_a = self._player_vol_opacity * alpha
             render_icon(cr, Glyph.Note if self._player_vol_is_app else Glyph.Loud, px + 20.0, btn_y - 7.0, 14.0, self._accent_color if self._player_vol_is_app else COLOR_DIM[:3], alpha=eff_a)
-            draw_text(cr, self._player_vol_text, px + 38.0, btn_y, font_size=11.0, color=self._accent_color if self._player_vol_is_app else COLOR_DIM[:3], alpha=eff_a, align="left", valign="center")
+            self._digits_player_vol.render(cr, px + 38.0, btn_y, font_size=11.0, color=self._accent_color if self._player_vol_is_app else (COLOR_DIM[0], COLOR_DIM[1], COLOR_DIM[2], eff_a), align="left", valign="center")
 
     def render_idle_big(self, cr: cairo.Context, px: float, py: float, pw: float, ph: float, alpha: float) -> None:
-        draw_text(cr, self._clock_time_str, px + 26.0, py + 48.0, font_size=46.0, bold=True, color=COLOR_WHITE, alpha=alpha, align="left", valign="center")
+        self._digits_big_clock.render(cr, px + 26.0, py + 48.0, font_size=46.0, color=(1.0, 1.0, 1.0, alpha), align="left", valign="center")
         draw_text(cr, self._clock_date_str, px + 28.0, py + 86.0, font_size=13.0, bold=False, color=COLOR_DIM[:3], alpha=alpha, align="left", valign="center")
         if self._quiet:
             date_w = measure_text(cr, self._clock_date_str, 13.0, bold=False)
@@ -3558,15 +3604,16 @@ class MainWindow(Gtk.Window):
         rx = px + pw - 24.0
         render_icon(cr, Glyph.Loud, rx - 54.0, py + 32.0, 16.0, COLOR_DIM[:3], alpha=alpha)
         vol_pct = int(round(max(0.0, self._last_volume) * 100))
-        draw_text(cr, f"{vol_pct}%", rx, py + 40.0, font_size=13.0, bold=True, color=COLOR_WHITE, alpha=alpha, align="right", valign="center")
+        self._digits_info_vol.set_text(f"{vol_pct}%")
+        self._digits_info_vol.render(cr, rx, py + 40.0, font_size=13.0, color=(1.0, 1.0, 1.0, alpha), align="right", valign="center")
 
         if self._headset_pct >= 0:
             render_icon(cr, Glyph.Headphones, rx - 54.0, py + 58.0, 16.0, COLOR_DIM[:3], alpha=alpha)
-            draw_text(cr, f"{self._headset_pct}%", rx, py + 66.0, font_size=13.0, bold=True, color=COLOR_WHITE, alpha=alpha, align="right", valign="center")
+            self._digits_info_headset.render(cr, rx, py + 66.0, font_size=13.0, color=(1.0, 1.0, 1.0, alpha), align="right", valign="center")
 
         if self._battery_known:
             render_icon(cr, Glyph.Battery, rx - 54.0, py + 84.0, 16.0, COLOR_DIM[:3], alpha=alpha)
-            draw_text(cr, f"{self._battery_pct}%", rx, py + 92.0, font_size=13.0, bold=True, color=COLOR_GREEN if self._last_plugged else COLOR_WHITE, alpha=alpha, align="right", valign="center")
+            self._digits_info_battery.render(cr, rx, py + 92.0, font_size=13.0, color=(COLOR_GREEN[0], COLOR_GREEN[1], COLOR_GREEN[2], alpha) if self._last_plugged else (1.0, 1.0, 1.0, alpha), align="right", valign="center")
 
     def render_focus(self, cr: cairo.Context, px: float, py: float, pw: float, ph: float, alpha: float) -> None:
         if alpha <= 0.001:
@@ -3784,7 +3831,14 @@ class MainWindow(Gtk.Window):
             render_icon(cr, glyph, px + 22.0, ry + 11.5, 17.0, tint, alpha=alpha)
             draw_text(cr, label, px + 49.0, ry + 20.0, font_size=13.5, bold=False, color=tint if glyph == Glyph.Power else COLOR_WHITE, alpha=alpha, align="left", valign="center")
             if extra:
-                draw_text(cr, extra, px + pw - 36.0, ry + 20.0, font_size=13.5, bold=False, color=tint, alpha=alpha, align="right", valign="center")
+                if glyph == Glyph.Clock and self._timer.active:
+                    self._digits_menu_timer.set_text(extra)
+                    self._digits_menu_timer.render(cr, px + pw - 36.0, ry + 20.0, font_size=13.5, color=(tint[0], tint[1], tint[2], alpha), align="right", valign="center")
+                elif glyph == Glyph.Tray and self._shelf.items:
+                    self._digits_shelf_menu.set_text(extra)
+                    self._digits_shelf_menu.render(cr, px + pw - 36.0, ry + 20.0, font_size=13.5, color=(tint[0], tint[1], tint[2], alpha), align="right", valign="center")
+                else:
+                    draw_text(cr, extra, px + pw - 36.0, ry + 20.0, font_size=13.5, bold=False, color=tint, alpha=alpha, align="right", valign="center")
             if glyph != Glyph.Power:
                 render_icon(cr, Glyph.Chevron, px + pw - 28.0, ry + 14.5, 11.0, COLOR_DIM[:3], alpha=alpha)
 

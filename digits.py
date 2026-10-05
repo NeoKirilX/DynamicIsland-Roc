@@ -89,7 +89,7 @@ class Digits:
 
         for i, new_ch in enumerate(text):
             cell = self._cells[i]
-            if cell.char == new_ch and not cell.is_animating:
+            if cell.char == new_ch:
                 continue
 
             old_ch = cell.char if cell.char else None
@@ -280,5 +280,20 @@ if __name__ == "__main__":
     countup_digits.render(cr, x=50, y=10, font_size=20.0, color=(0.2, 0.8, 0.4), align="left")
     countup_digits.tick(0.50)
     assert not countup_digits.is_animating
+
+    # Test fast sequential updates: unchanged digit must NOT re-animate from itself to itself!
+    seq = Digits("19", down=False)
+    seq.set_text("20")
+    seq.tick(0.05)
+    # Tens digit changed from '1' to '2', units from '9' to '0'
+    assert seq._cells[0].char == "2"
+    assert seq._cells[0].old_char == "1"
+
+    # Now quick update to "21": tens digit is still '2'!
+    seq.set_text("21")
+    assert seq._cells[0].char == "2"
+    # Tens digit must NOT re-animate from '2' to '2'!
+    assert seq._cells[0].old_char != "2", "Tens digit should not re-animate from 2 to 2 when unchanged!"
+    assert seq._cells[1].char == "1"
 
     print("All Digits component tests passed successfully!")
