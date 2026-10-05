@@ -14,10 +14,10 @@ release : F64
 release = 0.17
 
 rise : F64
-rise = 0.8
+rise = 0.4
 
 sink : F64
-sink = 2.5
+sink = 0.5
 
 floorDb : F64
 floorDb = -70.0

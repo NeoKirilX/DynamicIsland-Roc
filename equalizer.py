@@ -14,8 +14,8 @@ class Equalizer:
 
     RANGE_DB: float = 10.0
     CENTER: float = 0.5
-    RISE: float = 0.8
-    SINK: float = 2.5
+    RISE: float = 0.4
+    SINK: float = 0.5
     SPREAD_DB: float = 24.0
     FLOOR_DB: float = -70.0
 
