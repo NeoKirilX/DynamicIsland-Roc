@@ -656,22 +656,22 @@ class Goo:
 
         cr.new_sub_path()
         cr.move_to(x - ear_w, y)
+        cr.line_to(x + w + ear_w, y)
         cr.curve_to(
-            x - ear_w * 0.45, y,
-            x, y + ear_h * 0.45,
-            x, y + ear_h,
-        )
-        cr.line_to(x, y + h - r)
-        cr.arc(x + r, y + h - r, r, math.pi, 0.5 * math.pi)
-        cr.line_to(x + w - r, y + h)
-        cr.arc(x + w - r, y + h - r, r, 0.5 * math.pi, 0.0)
-        cr.line_to(x + w, y + ear_h)
-        cr.curve_to(
-            x + w, y + ear_h * 0.45,
             x + w + ear_w * 0.45, y,
-            x + w + ear_w, y,
+            x + w, y + ear_h * 0.45,
+            x + w, y + ear_h,
         )
-        cr.line_to(x - ear_w, y)
+        cr.line_to(x + w, y + h - r)
+        cr.arc(x + w - r, y + h - r, r, 0.0, 0.5 * math.pi)
+        cr.line_to(x + r, y + h)
+        cr.arc(x + r, y + h - r, r, 0.5 * math.pi, math.pi)
+        cr.line_to(x, y + ear_h)
+        cr.curve_to(
+            x, y + ear_h * 0.45,
+            x - ear_w * 0.45, y,
+            x - ear_w, y,
+        )
         cr.close_path()
 
 if __name__ == "__main__":
