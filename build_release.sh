@@ -32,6 +32,7 @@ pyinstaller \
   --exclude-module transformers \
   --exclude-module scipy \
   --exclude-module pandas \
+  --exclude-module yt_dlp \
   "$SCRIPT_DIR/dynamic_island.py"
 
 cd "$DIST_DIR"

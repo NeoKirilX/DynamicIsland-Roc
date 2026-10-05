@@ -1101,11 +1101,10 @@ class MainWindow(Gtk.Window):
             self.area.queue_draw()
 
         elif self._current_view == View.LOOK:
-            row_y_start = py + 44.0
-            row_h = 40.0
+            row_y_start, row_h, swatch_y = self.get_look_layout(ph)
             hovered = None
             for idx in range(11):
-                ry = row_y_start + idx * row_h
+                ry = py + row_y_start + idx * row_h
                 if px + 10 <= lx <= px + pw - 10 and ry <= ly < ry + row_h:
                     hovered = idx
                     self._row_list_look.move_to(ry, row_h, idx)
@@ -1401,76 +1400,68 @@ class MainWindow(Gtk.Window):
                 self.set_targets()
                 return
 
-            row_y_start = py + 44.0
-            row_h = 40.0
+            row_y_start, row_h, swatch_y = self.get_look_layout(ph)
             mod_step = self.get_modifier_step()
 
             if px <= lx <= px + pw:
-                if row_y_start <= ly < row_y_start + row_h:
-                    idx = SCALES.index(Settings.scale) if Settings.scale in SCALES else 1
-                    new_scale = SCALES[(idx + 1) % len(SCALES)]
-                    self.set_scale(new_scale)
-                    return
+                for idx in range(11):
+                    ry = py + row_y_start + idx * row_h
+                    if ry <= ly < ry + row_h:
+                        if idx == 0:
+                            idx_s = SCALES.index(Settings.scale) if Settings.scale in SCALES else 1
+                            new_scale = SCALES[(idx_s + 1) % len(SCALES)]
+                            self.set_scale(new_scale)
+                            return
+                        elif idx == 1:
+                            self.set_pos_y(Settings.pos_y + mod_step)
+                            return
+                        elif idx == 2:
+                            self.set_pos_x(Settings.pos_x + mod_step)
+                            return
+                        elif idx == 3:
+                            idx_r = RADII.index(Settings.radius) if Settings.radius in RADII else -1
+                            new_radius = RADII[(idx_r + 1) % len(RADII)] if idx_r >= 0 else RADII[0]
+                            self.set_radius(new_radius)
+                            return
+                        elif idx == 4:
+                            idx_h = HEIGHTS.index(Settings.height) if Settings.height in HEIGHTS else -1
+                            new_h = HEIGHTS[(idx_h + 1) % len(HEIGHTS)] if idx_h >= 0 else HEIGHTS[0]
+                            self.set_height(new_h)
+                            return
+                        elif idx == 5:
+                            idx_ts = TEXT_SCALES.index(Settings.text_scale) if Settings.text_scale in TEXT_SCALES else -1
+                            new_ts = TEXT_SCALES[(idx_ts + 1) % len(TEXT_SCALES)] if idx_ts >= 0 else TEXT_SCALES[0]
+                            self.set_text_scale(new_ts)
+                            return
+                        elif idx == 6:
+                            modes = [MATERIAL_LIQUID, MATERIAL_MATTE, MATERIAL_NONE]
+                            cur_idx = modes.index(Settings.material) if Settings.material in modes else 0
+                            new_mat = modes[(cur_idx + 1) % len(modes)]
+                            self.set_material(new_mat)
+                            return
+                        elif idx == 7:
+                            idx_g = GLASS_LEVELS.index(Settings.glass) if Settings.glass in GLASS_LEVELS else -1
+                            new_glass = GLASS_LEVELS[(idx_g + 1) % len(GLASS_LEVELS)] if idx_g >= 0 else GLASS_LEVELS[0]
+                            self.set_glass(new_glass)
+                            return
+                        elif idx == 8:
+                            Settings.line_bar = not Settings.line_bar
+                            self.area.queue_draw()
+                            return
+                        elif idx == 9:
+                            Settings.equalizer_dots = not Settings.equalizer_dots
+                            self.area.queue_draw()
+                            return
+                        elif idx == 10:
+                            colors = [c[0] for c in LOOK_COLORS]
+                            cur_idx = colors.index(Settings.accent) if Settings.accent in colors else 0
+                            new_accent = colors[(cur_idx + 1) % len(colors)]
+                            self.set_accent(new_accent)
+                            return
 
-                if row_y_start + row_h <= ly < row_y_start + 2 * row_h:
-                    self.set_pos_y(Settings.pos_y + mod_step)
-                    return
-
-                if row_y_start + 2 * row_h <= ly < row_y_start + 3 * row_h:
-                    self.set_pos_x(Settings.pos_x + mod_step)
-                    return
-
-                if row_y_start + 3 * row_h <= ly < row_y_start + 4 * row_h:
-                    idx = RADII.index(Settings.radius) if Settings.radius in RADII else -1
-                    new_radius = RADII[(idx + 1) % len(RADII)] if idx >= 0 else RADII[0]
-                    self.set_radius(new_radius)
-                    return
-
-                if row_y_start + 4 * row_h <= ly < row_y_start + 5 * row_h:
-                    idx = HEIGHTS.index(Settings.height) if Settings.height in HEIGHTS else -1
-                    new_h = HEIGHTS[(idx + 1) % len(HEIGHTS)] if idx >= 0 else HEIGHTS[0]
-                    self.set_height(new_h)
-                    return
-
-                if row_y_start + 5 * row_h <= ly < row_y_start + 6 * row_h:
-                    idx = TEXT_SCALES.index(Settings.text_scale) if Settings.text_scale in TEXT_SCALES else -1
-                    new_ts = TEXT_SCALES[(idx + 1) % len(TEXT_SCALES)] if idx >= 0 else TEXT_SCALES[0]
-                    self.set_text_scale(new_ts)
-                    return
-
-                if row_y_start + 6 * row_h <= ly < row_y_start + 7 * row_h:
-                    modes = [MATERIAL_LIQUID, MATERIAL_MATTE, MATERIAL_NONE]
-                    cur_idx = modes.index(Settings.material) if Settings.material in modes else 0
-                    new_mat = modes[(cur_idx + 1) % len(modes)]
-                    self.set_material(new_mat)
-                    return
-
-                if row_y_start + 7 * row_h <= ly < row_y_start + 8 * row_h:
-                    idx = GLASS_LEVELS.index(Settings.glass) if Settings.glass in GLASS_LEVELS else -1
-                    new_glass = GLASS_LEVELS[(idx + 1) % len(GLASS_LEVELS)] if idx >= 0 else GLASS_LEVELS[0]
-                    self.set_glass(new_glass)
-                    return
-
-                if row_y_start + 8 * row_h <= ly < row_y_start + 9 * row_h:
-                    Settings.line_bar = not Settings.line_bar
-                    self.area.queue_draw()
-                    return
-
-                if row_y_start + 9 * row_h <= ly < row_y_start + 10 * row_h:
-                    Settings.equalizer_dots = not Settings.equalizer_dots
-                    self.area.queue_draw()
-                    return
-
-                if row_y_start + 10 * row_h <= ly < row_y_start + 11 * row_h:
-                    colors = [c[0] for c in LOOK_COLORS]
-                    cur_idx = colors.index(Settings.accent) if Settings.accent in colors else 0
-                    new_accent = colors[(cur_idx + 1) % len(colors)]
-                    self.set_accent(new_accent)
-                    return
-
-            swatch_y = row_y_start + 11 * row_h + 18.0
+            swatch_y_abs = py + swatch_y
             step_x = (pw - 20.0) / len(LOOK_COLORS)
-            if swatch_y - 15.0 <= ly <= swatch_y + 15.0 and px <= lx <= px + pw:
+            if swatch_y_abs - 15.0 <= ly <= swatch_y_abs + 15.0 and px <= lx <= px + pw:
                 idx = int((lx - (px + 10.0)) / step_x)
                 if 0 <= idx < len(LOOK_COLORS):
                     self.set_accent(LOOK_COLORS[idx][0])
@@ -1575,53 +1566,53 @@ class MainWindow(Gtk.Window):
         if self._current_view == View.LOOK:
             nudge = 1 if up else -1
             mod_step = self.get_modifier_step(controller)
-            row_y_start = py + 44.0
-            row_h = 40.0
+            row_y_start, row_h, swatch_y = self.get_look_layout(ph)
+            row_idx = int((ly - (py + row_y_start)) / row_h)
 
-            if row_y_start <= ly < row_y_start + row_h:
+            if row_idx == 0:
                 idx = SCALES.index(Settings.scale) if Settings.scale in SCALES else 1
                 new_idx = max(0, min(len(SCALES) - 1, idx + nudge))
                 self.set_scale(SCALES[new_idx])
                 return True
-
-            if row_y_start + row_h <= ly < row_y_start + 2 * row_h:
+            elif row_idx == 1:
                 new_y = Settings.pos_y - nudge * mod_step
                 self.set_pos_y(new_y)
                 return True
-
-            if row_y_start + 2 * row_h <= ly < row_y_start + 3 * row_h:
+            elif row_idx == 2:
                 new_x = Settings.pos_x + nudge * mod_step
                 self.set_pos_x(new_x)
                 return True
-
-            if row_y_start + 3 * row_h <= ly < row_y_start + 4 * row_h:
+            elif row_idx == 3:
                 new_radius = max(0, min(100, Settings.radius + nudge * 5))
                 self.set_radius(new_radius)
                 return True
-
-            if row_y_start + 4 * row_h <= ly < row_y_start + 5 * row_h:
+            elif row_idx == 4:
                 new_h = max(0, min(16, Settings.height + nudge))
                 self.set_height(new_h)
                 return True
-
-            if row_y_start + 5 * row_h <= ly < row_y_start + 6 * row_h:
+            elif row_idx == 5:
                 new_ts = max(80, min(130, Settings.text_scale + nudge * 5))
                 self.set_text_scale(new_ts)
                 return True
-
-            if row_y_start + 6 * row_h <= ly < row_y_start + 7 * row_h:
+            elif row_idx == 6:
                 modes = [MATERIAL_LIQUID, MATERIAL_MATTE, MATERIAL_NONE]
                 cur_idx = modes.index(Settings.material) if Settings.material in modes else 0
                 new_idx = max(0, min(len(modes) - 1, cur_idx - nudge))
                 self.set_material(modes[new_idx])
                 return True
-
-            if row_y_start + 7 * row_h <= ly < row_y_start + 8 * row_h:
+            elif row_idx == 7:
                 new_glass = max(20, min(100, Settings.glass + nudge * 5))
                 self.set_glass(new_glass)
                 return True
-
-            if row_y_start + 8 * row_h <= ly:
+            elif row_idx == 8:
+                Settings.line_bar = not Settings.line_bar
+                self.area.queue_draw()
+                return True
+            elif row_idx == 9:
+                Settings.equalizer_dots = not Settings.equalizer_dots
+                self.area.queue_draw()
+                return True
+            elif row_idx == 10 or ly >= py + swatch_y - 15.0:
                 colors = [c[0] for c in LOOK_COLORS]
                 cur_idx = colors.index(Settings.accent) if Settings.accent in colors else 0
                 new_idx = max(0, min(len(colors) - 1, cur_idx + nudge))
@@ -1718,6 +1709,13 @@ class MainWindow(Gtk.Window):
         self.sync_spectrum()
         self.sync_rim()
 
+    def get_look_layout(self, ph: float) -> tuple[float, float, float]:
+        row_y_start = 44.0
+        avail_for_rows = ph - row_y_start - 48.0
+        row_h = max(26.0, min(36.0, avail_for_rows / 11.0))
+        swatch_y = row_y_start + 11.0 * row_h + 16.0
+        return row_y_start, row_h, swatch_y
+
     def size_of(self, view: View) -> Dims:
         d = SIZES[view]
         if view == View.MEDIA:
@@ -1725,7 +1723,10 @@ class MainWindow(Gtk.Window):
         if view == View.MEDIA_BIG and self._player_room:
             return d.with_h(PLAYER_HEIGHT + self._player_lyric_h)
         if view == View.LOOK:
-            return Dims(LOOK_WIDTH, LOOK_HEIGHT, 34)
+            scale_val = max(0.01, self._size.value)
+            max_screen_h = (self.win_height - 60.0) / scale_val if self.win_height > 200 else 500.0
+            look_h = max(380.0, min(500.0, max_screen_h))
+            return Dims(LOOK_WIDTH, look_h, 34)
         return d
 
     def set_targets(self) -> None:
@@ -3963,15 +3964,14 @@ class MainWindow(Gtk.Window):
             (Glyph.Pulse, "Эквалайзер", eq_style_label),
             (Glyph.Drop, "Акцентный цвет", cur_accent_label),
         ]
-        row_y_start = py + 44.0
-        row_h = 40.0
+        row_y_start, row_h, swatch_y = self.get_look_layout(ph)
         for idx, (glyph, label, val_text) in enumerate(rows):
-            ry = row_y_start + idx * row_h
-            render_icon(cr, glyph, px + 22.0, ry + 11.5, 17.0, COLOR_DIM[:3], alpha=alpha)
-            draw_text(cr, label, px + 49.0, ry + 20.0, font_size=13.5, bold=False, color=COLOR_WHITE, alpha=alpha, align="left", valign="center")
-            draw_text(cr, val_text, px + pw - 24.0, ry + 20.0, font_size=13.5, bold=False, color=COLOR_DIM[:3], alpha=alpha, align="right", valign="center")
+            ry = py + row_y_start + idx * row_h
+            render_icon(cr, glyph, px + 22.0, ry + (row_h - 17.0) / 2.0, 17.0, COLOR_DIM[:3], alpha=alpha)
+            draw_text(cr, label, px + 49.0, ry + row_h / 2.0, font_size=13.0, bold=False, color=COLOR_WHITE, alpha=alpha, align="left", valign="center")
+            draw_text(cr, val_text, px + pw - 24.0, ry + row_h / 2.0, font_size=13.0, bold=False, color=COLOR_DIM[:3], alpha=alpha, align="right", valign="center")
 
-        swatch_y = row_y_start + len(rows) * row_h + 18.0
+        swatch_y_abs = py + swatch_y
         step_x = (pw - 20.0) / len(LOOK_COLORS)
         for idx, (col, _) in enumerate(LOOK_COLORS):
             sx = px + 10.0 + idx * step_x + step_x / 2.0
@@ -3979,13 +3979,13 @@ class MainWindow(Gtk.Window):
 
             if is_checked:
                 cr.new_sub_path()
-                cr.arc(sx, swatch_y, 11.0, 0, 2 * math.pi)
+                cr.arc(sx, swatch_y_abs, 11.0, 0, 2 * math.pi)
                 cr.set_source_rgba(1.0, 1.0, 1.0, alpha)
                 cr.set_line_width(1.5)
                 cr.stroke()
 
             cr.new_sub_path()
-            cr.arc(sx, swatch_y, 7.0, 0, 2 * math.pi)
+            cr.arc(sx, swatch_y_abs, 7.0, 0, 2 * math.pi)
             if col is None:
                 cr.set_source_rgba(1.0, 0.4, 0.7, alpha)
             else:

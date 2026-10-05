@@ -943,6 +943,8 @@ class MediaService:
 
         session.art_url = new_art_url
         session.art_path = self._process_art_url(new_art_url)
+        if not session.art_path and session.title:
+            self._async_fetch_ytdlp_cover(session)
 
     def _process_art_url(self, art_url: str) -> Optional[str]:
         if not art_url:
@@ -1019,6 +1021,74 @@ class MediaService:
                     self._notify_changed()
         except Exception as e:
             logger.debug("Async cover download failed for %s: %s", url, e)
+
+    def _async_fetch_ytdlp_cover(self, session: PlayerSession) -> None:
+        title = session.title
+        artist = session.artist
+        track_url = session.url
+        if not title:
+            return
+
+        query_key = f"{artist} - {title}" if artist else title
+        url_hash = hashlib.sha256(query_key.encode("utf-8")).hexdigest()[:16]
+        cached_file = COVER_CACHE_DIR / f"ytdlp_{url_hash}.jpg"
+
+        if cached_file.exists() and cached_file.stat().st_size > 0:
+            with self._lock:
+                session.art_path = str(cached_file)
+                if self._current_player == session.bus_name or not self._art_path:
+                    self._art_path = str(cached_file)
+                    self._palette, self._accent = extract_dominant_palette(cached_file)
+                    self._notify_changed()
+            return
+
+        def worker():
+            thumb_url = None
+            if shutil.which("yt-dlp"):
+                try:
+                    target = track_url if (track_url and track_url.startswith("http")) else f"ytsearch1:{query_key}"
+                    res = subprocess.run(
+                        ["yt-dlp", "--get-thumbnail", "--no-warnings", target],
+                        capture_output=True,
+                        text=True,
+                        timeout=6.0,
+                        check=False,
+                    )
+                    if res.returncode == 0 and res.stdout.strip():
+                        thumb_url = res.stdout.strip().splitlines()[0]
+                except Exception as e:
+                    logger.debug("yt-dlp CLI query failed for %s: %s", query_key, e)
+
+            if not thumb_url:
+                try:
+                    import importlib
+                    ytdlp_mod = importlib.import_module("yt_dlp")
+                    ydl_opts = {
+                        "quiet": True,
+                        "skip_download": True,
+                        "extract_flat": True,
+                        "noplaylist": True,
+                        "socket_timeout": 6,
+                    }
+                    target = track_url if (track_url and track_url.startswith("http")) else f"ytsearch1:{query_key}"
+                    with ytdlp_mod.YoutubeDL(ydl_opts) as ydl:
+                        info = ydl.extract_info(target, download=False)
+                        if info:
+                            item = info["entries"][0] if ("entries" in info and info["entries"]) else info
+                            thumbs = item.get("thumbnails")
+                            if isinstance(thumbs, list) and thumbs:
+                                thumb_url = thumbs[-1].get("url") or thumbs[0].get("url")
+                            elif isinstance(thumbs, str):
+                                thumb_url = thumbs
+                            elif item.get("thumbnail"):
+                                thumb_url = item.get("thumbnail")
+                except Exception as e:
+                    logger.debug("yt_dlp python module query failed for %s: %s", query_key, e)
+
+            if thumb_url:
+                self._async_download_cover(thumb_url, cached_file)
+
+        threading.Thread(target=worker, daemon=True).start()
 
     def _yield(self, playing_bus_name: str) -> None:
         sess = self._players.get(playing_bus_name)
