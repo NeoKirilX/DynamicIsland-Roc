@@ -897,14 +897,68 @@ class MainWindow(Gtk.Window):
         self._collapse_expiry = 0.0
         self.set_targets()
 
+    def _finish_grab(self, x: float, y: float) -> None:
+        if self._grab == "none":
+            return
+        grab = self._grab
+        pulled = self._pull_by
+        leant = self._lean_by
+        now = time.monotonic()
+        pace_x = self._grab_pace_x if (now - self._grab_at < 0.09) else 0.0
+        pace_y = self._grab_pace_y if (now - self._grab_at < 0.09) else 0.0
+
+        self._grab = "none"
+        self._pull_by = 0.0
+        self._lean_by = 0.0
+        self._lean.target = 0.0
+        self._pressed = False
+
+        if grab == "lean":
+            way = 0
+            if abs(leant) >= 12.0 and abs(pace_x) >= 550.0:
+                way = int(math.copysign(1, pace_x))
+            elif abs(leant) >= 40.0:
+                way = int(math.copysign(1, leant))
+
+            if way != 0 and self.media_active:
+                if way < 0:
+                    self.skipped(1)
+                    self._skip_next.play()
+                    self._media.next()
+                else:
+                    self.skipped(-1)
+                    self._skip_prev.play()
+                    self._media.previous()
+            self.set_targets()
+            return
+
+        if grab == "pull":
+            way_y = 0
+            if abs(pulled) >= 12.0 and abs(pace_y) >= 550.0:
+                way_y = 1
+            elif abs(pulled) >= 42.0:
+                way_y = 1
+
+            if way_y <= 0:
+                self.set_targets()
+                return
+
+            self.open_panel(Panel.PLAYER if (self.media_active or not self._timer.active) else Panel.TIMER)
+            self.update_view()
+            self.set_targets()
+            return
+
     def on_mouse_leave(self, controller: Gtk.EventControllerMotion) -> None:
         self._hover = False
-        self._pressed = False
         self._bubble_hover = False
         self._bubble_pressed = False
         self._row_list_menu.clear_hover()
         self._row_list_settings.clear_hover()
         self._row_list_look.clear_hover()
+        if self._grab != "none":
+            self._finish_grab(self._mouse_x, self._mouse_y)
+        else:
+            self._pressed = False
         self.set_targets()
         if self._panel != Panel.NONE:
             self._collapse_expiry = time.monotonic() + COLLAPSE_DELAY_SEC
@@ -912,6 +966,22 @@ class MainWindow(Gtk.Window):
     def on_mouse_motion(self, controller: Gtk.EventControllerMotion, x: float, y: float) -> None:
         self._mouse_x = x
         self._mouse_y = y
+
+        if self._grab != "none" or self._pressed or self._dragging_look:
+            state = 0
+            if hasattr(controller, "get_current_event_state"):
+                try:
+                    state = int(controller.get_current_event_state())
+                except Exception:
+                    pass
+            if state and not (state & Gdk.ModifierType.BUTTON1_MASK):
+                if self._grab != "none":
+                    self._finish_grab(x, y)
+                self._pressed = False
+                self._dragging_look = False
+                self._scrubbing = False
+                self.set_targets()
+                return
 
         if self._dragging_look and self._current_view == View.LOOK:
             step = self.get_modifier_step(controller)
@@ -1146,51 +1216,8 @@ class MainWindow(Gtk.Window):
         self._row_list_look.set_pressed(False)
 
         if self._grab != "none":
-            grab = self._grab
-            pulled = self._pull_by
-            leant = self._lean_by
-            pace_x = self._grab_pace_x if (time.monotonic() - self._grab_at < 0.09) else 0.0
-            pace_y = self._grab_pace_y if (time.monotonic() - self._grab_at < 0.09) else 0.0
-
-            self._grab = "none"
-            self._pull_by = 0.0
-            self._lean_by = 0.0
-            self._lean.target = 0.0
-
-            if grab == "lean":
-                way = 0
-                if abs(leant) >= 12.0 and abs(pace_x) >= 550.0:
-                    way = int(math.copysign(1, pace_x))
-                elif abs(leant) >= 40.0:
-                    way = int(math.copysign(1, leant))
-
-                if way != 0 and self.media_active:
-                    if way < 0:
-                        self.skipped(1)
-                        self._skip_next.play()
-                        self._media.next()
-                    else:
-                        self.skipped(-1)
-                        self._skip_prev.play()
-                        self._media.previous()
-                self.set_targets()
-                return
-
-            if grab == "pull":
-                way_y = 0
-                if abs(pulled) >= 12.0 and abs(pace_y) >= 550.0:
-                    way_y = 1
-                elif abs(pulled) >= 42.0:
-                    way_y = 1
-
-                if way_y <= 0:
-                    self.set_targets()
-                    return
-
-                self.open_panel(Panel.PLAYER if (self.media_active or not self._timer.active) else Panel.TIMER)
-                self.update_view()
-                self.set_targets()
-                return
+            self._finish_grab(x, y)
+            return
 
         if not self._pressed:
             return
@@ -2006,6 +2033,13 @@ class MainWindow(Gtk.Window):
     def update_input_region(self) -> None:
         surf = self.get_surface()
         if not surf:
+            return
+
+        if self._grab != "none" or self._pressed or self._dragging_look or self._scrubbing:
+            w_win = max(1, int(self.win_width))
+            h_win = max(1, int(self.win_height))
+            reg = cairo.Region(cairo.RectangleInt(0, 0, w_win, h_win))
+            surf.set_input_region(reg)
             return
 
         size = max(0.01, self._size.value)
