@@ -36,7 +36,7 @@ def _query_hyprland_fullscreen(exclude_pid: Optional[int] = None) -> Optional[bo
             ["hyprctl", "activewindow", "-j"],
             capture_output=True,
             text=True,
-            timeout=1.0,
+            timeout=0.6,
             check=False,
         )
         if res.returncode == 0 and res.stdout.strip():
@@ -55,29 +55,49 @@ def _query_hyprland_fullscreen(exclude_pid: Optional[int] = None) -> Optional[bo
                 fs = data.get("fullscreen")
                 fs_client = data.get("fullscreenClient")
                 # In Hyprland:
-                # 0 = not fullscreen, 1 = maximized (super+F), 2 = true fullscreen.
-                # Maximized keeps top bars/island visible; only true fullscreen (2) hides the island.
-                if fs == 2 or fs_client == 2 or (fs is True and fs != 1):
-                    return True
+                # 0 = not fullscreen
+                # 1 = maximized (super+D / super+F maximized) -> DO NOT HIDE ISLAND!
+                # 2 = true fullscreen (games, video player, F11) -> HIDE ISLAND!
                 if fs == 1 or fs_client == 1:
                     return False
+                if fs == 2 or fs_client == 2:
+                    return True
 
         res_ws = subprocess.run(
             ["hyprctl", "activeworkspace", "-j"],
             capture_output=True,
             text=True,
-            timeout=1.0,
+            timeout=0.6,
             check=False,
         )
         if res_ws.returncode == 0 and res_ws.stdout.strip():
             ws_data = json.loads(res_ws.stdout)
             if isinstance(ws_data, dict) and ws_data.get("hasfullscreen") is True:
-                # If active window is maximized (mode 1), do not consider it fullscreen
-                if fs == 1 or fs_client == 1:
-                    return False
                 last_title = str(ws_data.get("lastwindowtitle", "")).lower()
-                if not any(k in last_title for k in ("dynamic-island", "dynamicisland")):
-                    return True
+                if any(k in last_title for k in ("dynamic-island", "dynamicisland")):
+                    return False
+
+                try:
+                    res_clients = subprocess.run(
+                        ["hyprctl", "clients", "-j"],
+                        capture_output=True,
+                        text=True,
+                        timeout=0.6,
+                        check=False,
+                    )
+                    if res_clients.returncode == 0 and res_clients.stdout.strip():
+                        clients = json.loads(res_clients.stdout)
+                        ws_id = ws_data.get("id")
+                        for c in clients:
+                            if c.get("workspace", {}).get("id") == ws_id:
+                                c_fs = c.get("fullscreen")
+                                c_fsc = c.get("fullscreenClient")
+                                if c_fs == 1 or c_fsc == 1:
+                                    return False
+                                if c_fs == 2 or c_fsc == 2:
+                                    return True
+                except Exception:
+                    pass
 
         return False
     except Exception as e:
