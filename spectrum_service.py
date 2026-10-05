@@ -151,10 +151,7 @@ class SpectrumService:
     def read_bands(self, out_bands: list[float]) -> bool:
         now = time.monotonic()
         with self._lock:
-            if self._failed:
-                return False
-
-            if (self._is_silent or (now - self._last_data_time > self.SILENCE_SEC)) and self.fallback_wobble:
+            if (self._failed or self._is_silent or (now - self._last_data_time > self.SILENCE_SEC)) and self.fallback_wobble:
                 self._generate_wobble(now)
 
             if out_bands is not None:
@@ -177,13 +174,14 @@ class SpectrumService:
             self._thread.join(timeout=0.5)
 
     def _generate_wobble(self, now: float) -> None:
-        wobble_level = math.pow(max(0.0, min(1.0, self._peak * 1.8)), 0.6)
+        eff_peak = 0.55 if self._peak <= 1e-4 else self._peak
+        wobble_level = math.pow(max(0.0, min(1.0, eff_peak * 1.8)), 0.6)
         mid = (BANDS - 1) / 2.0
         for i in range(BANDS):
             noise = 0.5 + 0.5 * math.sin(now * _F1[i] + i * 1.9) * math.cos(now * _F2[i] + i * 0.7)
             envelope = 1.0 - 0.3 * abs(i - mid) / mid
             target = wobble_level * envelope * (0.3 + 0.7 * noise)
-            self._bands[i] = float(target * 0.08)
+            self._bands[i] = float(target * 0.40)
 
     def _open_capture(self) -> bool:
         targets = ["@DEFAULT_MONITOR@", "@DEFAULT_SINK@.monitor", None]
@@ -205,7 +203,7 @@ class SpectrumService:
                     stdout=subprocess.PIPE,
                     stderr=subprocess.DEVNULL,
                 )
-                r, _, _ = select.select([proc.stdout], [], [], 0.25)
+                r, _, _ = select.select([proc.stdout], [], [], 0.35)
                 if r and proc.stdout:
                     self._proc = proc
                     self._failed = False
@@ -216,7 +214,6 @@ class SpectrumService:
             except (FileNotFoundError, OSError):
                 break
 
-        self._failed = True
         return False
 
     def _close_capture(self) -> None:

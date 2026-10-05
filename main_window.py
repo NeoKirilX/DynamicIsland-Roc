@@ -115,6 +115,8 @@ COLOR_INDIGO: Tuple[float, float, float] = (0.49, 0.478, 1.0)
 CARRY_TIMER: float = 78.0
 CARRY_SHELF: float = 54.0
 
+SETTINGS_HEIGHT = 460.0
+
 SIZES: dict[View, Dims] = {
     View.IDLE: Dims(118, 34, 17),
     View.MEDIA: Dims(210, 34, 17),
@@ -129,7 +131,7 @@ SIZES: dict[View, Dims] = {
     View.TIMER_BIG: Dims(330, 92, 40),
     View.TIMER_SET: Dims(300, 190, 38),
     View.MENU: Dims(300, 248, 34),
-    View.SETTINGS: Dims(320, 414, 34),
+    View.SETTINGS: Dims(320, SETTINGS_HEIGHT, 34),
     View.LOOK: Dims(LOOK_WIDTH, LOOK_HEIGHT, 34),
     View.SHELF: Dims(380, 136, 34),
     View.UPDATE: Dims(340, 230, 34),
@@ -1087,11 +1089,10 @@ class MainWindow(Gtk.Window):
             self.area.queue_draw()
 
         elif self._current_view == View.SETTINGS:
-            row_y_start = py + 44.0
-            row_h = 40.0
+            row_y_start, row_h = self.get_settings_layout(ph)
             hovered = None
             for idx in range(10):
-                ry = row_y_start + idx * row_h
+                ry = py + row_y_start + idx * row_h
                 if px + 10 <= lx <= px + pw - 10 and ry <= ly < ry + row_h:
                     hovered = idx
                     self._row_list_settings.move_to(ry, row_h, idx)
@@ -1349,8 +1350,7 @@ class MainWindow(Gtk.Window):
                 self.set_targets()
                 return
 
-            row_y_start = py + 44.0
-            row_h = 40.0
+            row_y_start, row_h = self.get_settings_layout(ph)
             setting_keys = [
                 "lyrics",
                 "lyric_effects",
@@ -1364,7 +1364,7 @@ class MainWindow(Gtk.Window):
             ]
             for idx in range(9):
                 key = setting_keys[idx]
-                ry = row_y_start + idx * row_h
+                ry = py + row_y_start + idx * row_h
                 if px <= lx <= px + pw and ry <= ly < ry + row_h:
                     cur = getattr(Settings, key)
                     setattr(Settings, key, not cur)
@@ -1380,7 +1380,8 @@ class MainWindow(Gtk.Window):
                     self.area.queue_draw()
                     return
 
-            if px <= lx <= px + pw and row_y_start + 9 * row_h <= ly < row_y_start + 10 * row_h:
+            upd_ry = py + row_y_start + 9 * row_h
+            if px <= lx <= px + pw and upd_ry <= ly < upd_ry + row_h:
                 self.open_panel(Panel.UPDATE)
                 self._updater.check_async()
                 self.update_view()
@@ -1709,6 +1710,12 @@ class MainWindow(Gtk.Window):
         self.sync_spectrum()
         self.sync_rim()
 
+    def get_settings_layout(self, ph: float) -> tuple[float, float]:
+        row_y_start = 44.0
+        avail_for_rows = ph - row_y_start - 12.0
+        row_h = max(26.0, min(38.0, avail_for_rows / 10.0))
+        return row_y_start, row_h
+
     def get_look_layout(self, ph: float) -> tuple[float, float, float]:
         row_y_start = 44.0
         avail_for_rows = ph - row_y_start - 48.0
@@ -1716,12 +1723,25 @@ class MainWindow(Gtk.Window):
         swatch_y = row_y_start + 11.0 * row_h + 16.0
         return row_y_start, row_h, swatch_y
 
+    @property
+    def lyrics_lines(self) -> list[tuple[float, str]]:
+        return self._lyrics.for_duration(self._media.duration)
+
+    @property
+    def _lyrics_lines(self) -> list[tuple[float, str]]:
+        return self._lyrics.for_duration(self._media.duration)
+
     def size_of(self, view: View) -> Dims:
         d = SIZES[view]
         if view == View.MEDIA:
             return d.with_w(self._media_width)
         if view == View.MEDIA_BIG and self._player_room:
             return d.with_h(PLAYER_HEIGHT + self._player_lyric_h)
+        if view == View.SETTINGS:
+            scale_val = max(0.01, self._size.value)
+            max_screen_h = (self.win_height - 60.0) / scale_val if self.win_height > 200 else 460.0
+            settings_h = max(340.0, min(460.0, max_screen_h))
+            return Dims(320.0, settings_h, 34)
         if view == View.LOOK:
             scale_val = max(0.01, self._size.value)
             max_screen_h = (self.win_height - 60.0) / scale_val if self.win_height > 200 else 500.0
@@ -3914,20 +3934,19 @@ class MainWindow(Gtk.Window):
             (Glyph.Linux, "Запускать при старте", "autostart"),
             (Glyph.Lines, "Заглавная буква в названии", "capitalize_title"),
         ]
-        row_y_start = py + 44.0
-        row_h = 40.0
+        row_y_start, row_h = self.get_settings_layout(ph)
         for idx, (glyph, label, key) in enumerate(rows):
-            ry = row_y_start + idx * row_h
-            render_icon(cr, glyph, px + 22.0, ry + 11.5, 17.0, COLOR_DIM[:3], alpha=alpha)
-            draw_text(cr, label, px + 49.0, ry + 20.0, font_size=13.5, bold=False, color=COLOR_WHITE, alpha=alpha, align="left", valign="center")
-            self._toggles[key].render(cr, px + pw - 50.0, ry + 10.0, w=38.0, h=22.0)
+            ry = py + row_y_start + idx * row_h
+            render_icon(cr, glyph, px + 22.0, ry + (row_h - 17.0) / 2.0, 17.0, COLOR_DIM[:3], alpha=alpha)
+            draw_text(cr, label, px + 49.0, ry + row_h / 2.0, font_size=13.0, bold=False, color=COLOR_WHITE, alpha=alpha, align="left", valign="center")
+            self._toggles[key].render(cr, px + pw - 50.0, ry + (row_h - 22.0) / 2.0, w=38.0, h=22.0)
 
         # Update row (index 9)
-        upd_ry = row_y_start + len(rows) * row_h
-        render_icon(cr, Glyph.Sparkle, px + 22.0, upd_ry + 11.5, 17.0, COLOR_ORANGE if self._updater.state == UpdateState.AVAILABLE else COLOR_DIM[:3], alpha=alpha)
-        draw_text(cr, "Обновление", px + 49.0, upd_ry + 20.0, font_size=13.5, bold=False, color=COLOR_WHITE, alpha=alpha, align="left", valign="center")
-        draw_text(cr, f"v{self._updater.latest_version}", px + pw - 38.0, upd_ry + 20.0, font_size=13.0, bold=False, color=COLOR_DIM[:3], alpha=alpha, align="right", valign="center")
-        render_icon(cr, Glyph.Chevron, px + pw - 26.0, upd_ry + 14.5, 11.0, COLOR_DIM[:3], alpha=alpha)
+        upd_ry = py + row_y_start + len(rows) * row_h
+        render_icon(cr, Glyph.Sparkle, px + 22.0, upd_ry + (row_h - 17.0) / 2.0, 17.0, COLOR_ORANGE if self._updater.state == UpdateState.AVAILABLE else COLOR_DIM[:3], alpha=alpha)
+        draw_text(cr, "Обновление", px + 49.0, upd_ry + row_h / 2.0, font_size=13.0, bold=False, color=COLOR_WHITE, alpha=alpha, align="left", valign="center")
+        draw_text(cr, f"v{self._updater.latest_version}", px + pw - 38.0, upd_ry + row_h / 2.0, font_size=13.0, bold=False, color=COLOR_DIM[:3], alpha=alpha, align="right", valign="center")
+        render_icon(cr, Glyph.Chevron, px + pw - 26.0, upd_ry + (row_h - 11.0) / 2.0, 11.0, COLOR_DIM[:3], alpha=alpha)
 
     def render_look(self, cr: cairo.Context, px: float, py: float, pw: float, ph: float, alpha: float) -> None:
         render_icon(cr, Glyph.Back, px + 20.0, py + 18.0, 10.0, COLOR_DIM[:3], alpha=0.6 * alpha)

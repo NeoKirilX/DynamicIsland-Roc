@@ -137,7 +137,7 @@ dimsForView = |view, hasLyrics|
         TimerBig -> { w: 330.0, h: 92.0, r: 40.0 }
         TimerSet -> { w: 300.0, h: 190.0, r: 38.0 }
         Menu -> { w: 300.0, h: 208.0, r: 34.0 }
-        Settings -> { w: 320.0, h: 454.0, r: 34.0 }
+        Settings -> { w: 320.0, h: 460.0, r: 34.0 }
         Look -> { w: 320.0, h: 540.0, r: 34.0 }
         Shelf -> { w: 380.0, h: 136.0, r: 34.0 }
         Update -> { w: 340.0, h: 230.0, r: 34.0 }
@@ -244,7 +244,7 @@ expect
     and Num.is_approx_eq dMenu.h 208.0 {}
     and Num.is_approx_eq dMenu.r 34.0 {}
     and Num.is_approx_eq dSettings.w 320.0 {}
-    and Num.is_approx_eq dSettings.h 454.0 {}
+    and Num.is_approx_eq dSettings.h 460.0 {}
     and Num.is_approx_eq dSettings.r 34.0 {}
     and Num.is_approx_eq dLook.w 320.0 {}
     and Num.is_approx_eq dLook.h 540.0 {}

@@ -129,7 +129,8 @@ class Equalizer:
             self._targets[i] = max(0.0, min(1.0, val))
 
     def _wobble(self, peak: float, t: float) -> None:
-        level = math.pow(max(0.0, min(1.0, peak * 1.8)), 0.6)
+        eff_peak = 0.55 if peak <= 0.0 else peak
+        level = math.pow(max(0.0, min(1.0, eff_peak * 1.8)), 0.6)
         mid = (self._bars - 1) / 2.0
         for i in range(self._bars):
             f_idx = i % 8
