@@ -165,6 +165,10 @@ class SpectrumService:
         self.read_bands(bands)
         return bands
 
+    @property
+    def levels(self) -> list[float]:
+        return self.get_bands()
+
     def close(self) -> None:
         self._stop_event.set()
         self._active = False

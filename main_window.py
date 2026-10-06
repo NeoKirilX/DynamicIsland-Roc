@@ -77,6 +77,11 @@ from settings import (
     COMBO_SPLIT_WORDS,
     COMBO_SPLIT_LINES,
     COMBO_SPLITS,
+    PLAYER_BGS,
+    PLAYER_BG_GLOW,
+    PLAYER_BG_MATRIX,
+    PLAYER_BG_STARS,
+    PLAYER_BG_BOTH,
     format_combo_badge,
     Settings,
 )
@@ -94,6 +99,8 @@ from weather_service import WeatherService, WeatherInfo
 from system_service import SystemService, SystemInfo
 from i18n import t, LANGUAGES, LANGUAGE_KEYS
 from config_service import ConfigService, EXPORTS_DIR
+from starfield import StarField
+from dotmatrix import DotMatrix
 
 try:
     from PIL import Image
@@ -474,6 +481,8 @@ class MainWindow(Gtk.Window):
         self._eq_small = Equalizer(bars=5)
         self._eq_toast = Equalizer(bars=5)
         self._eq_big = Equalizer(bars=8)
+        self._starfield = StarField()
+        self._dotmatrix = DotMatrix()
         self._digits_timer = Digits("25:00", down=True)
         self._digits_bubble = Digits("25:00", down=True)
         self._digits_big_timer = Digits("25:00", down=True)
@@ -1665,7 +1674,7 @@ class MainWindow(Gtk.Window):
             mod_step = self.get_modifier_step()
 
             if px <= lx <= px + pw:
-                for idx in range(14):
+                for idx in range(15):
                     ry = py + row_y_start + idx * row_h
                     if ry <= ly < ry + row_h:
                         if idx == 0:
@@ -1731,6 +1740,13 @@ class MainWindow(Gtk.Window):
                             self.area.queue_draw()
                             return
                         elif idx == 13:
+                            bgs = list(PLAYER_BGS)
+                            cur_b = bgs.index(Settings.player_bg) if Settings.player_bg in bgs else 0
+                            Settings.player_bg = bgs[(cur_b + 1) % len(bgs)]
+                            play_sound("click")
+                            self.area.queue_draw()
+                            return
+                        elif idx == 14:
                             colors = [c[0] for c in LOOK_COLORS]
                             cur_idx = colors.index(Settings.accent) if Settings.accent in colors else 0
                             new_accent = colors[(cur_idx + 1) % len(colors)]
@@ -2211,9 +2227,31 @@ class MainWindow(Gtk.Window):
     def get_look_layout(self, ph: float) -> tuple[float, float, float]:
         row_y_start = 44.0
         avail_for_rows = ph - row_y_start - 48.0
-        row_h = max(24.0, min(36.0, avail_for_rows / 14.0))
-        swatch_y = row_y_start + 14.0 * row_h + 16.0
+        row_h = max(24.0, min(36.0, avail_for_rows / 15.0))
+        swatch_y = row_y_start + 15.0 * row_h + 16.0
         return row_y_start, row_h, swatch_y
+
+    @classmethod
+    def menu_direction(cls, from_v: Optional[View], to_v: View) -> int:
+        if not from_v:
+            return 0
+        depth = {
+            View.MENU: 0,
+            View.SETTINGS: 1,
+            View.LOOK: 1,
+            View.SHELF: 1,
+            View.UPDATE: 2,
+            View.TEXT_ANIM: 2,
+            View.COMBO: 3,
+        }
+        if from_v in depth and to_v in depth:
+            d_from = depth[from_v]
+            d_to = depth[to_v]
+            if d_to > d_from:
+                return 1
+            elif d_to < d_from:
+                return -1
+        return 0
 
     @property
     def lyrics_lines(self) -> list[tuple[float, str]]:
@@ -3767,23 +3805,44 @@ class MainWindow(Gtk.Window):
         prev = self._previous_view
 
         if prev and trans < 1.0 and prev != self._current_view:
-            cr.save()
-            out_alpha = 1.0 - trans
-            out_scale = 1.0 - 0.1 * trans
-            cr.translate(0.0, h / 2.0)
-            cr.scale(out_scale, out_scale)
-            cr.translate(0.0, -h / 2.0)
-            self.render_view(cr, prev, pill_x, pill_y, w, h, alpha=out_alpha)
-            cr.restore()
+            direction = self.menu_direction(prev, self._current_view)
+            if direction != 0:
+                slide_dist = 56.0
+                out_ease = trans * trans
+                out_slide_x = -direction * slide_dist * out_ease
+                out_alpha = max(0.0, 1.0 - trans * 1.3)
 
-            cr.save()
-            in_alpha = trans
-            in_scale = 0.9 + 0.1 * trans
-            cr.translate(0.0, h / 2.0)
-            cr.scale(in_scale, in_scale)
-            cr.translate(0.0, -h / 2.0)
-            self.render_view(cr, self._current_view, pill_x, pill_y, w, h, alpha=in_alpha)
-            cr.restore()
+                in_ease = 1.0 - (1.0 - trans) ** 3
+                in_slide_x = direction * slide_dist * (1.0 - in_ease)
+                in_alpha = min(1.0, trans * 1.3)
+
+                cr.save()
+                cr.translate(out_slide_x, 0.0)
+                self.render_view(cr, prev, pill_x, pill_y, w, h, alpha=out_alpha)
+                cr.restore()
+
+                cr.save()
+                cr.translate(in_slide_x, 0.0)
+                self.render_view(cr, self._current_view, pill_x, pill_y, w, h, alpha=in_alpha)
+                cr.restore()
+            else:
+                cr.save()
+                out_alpha = 1.0 - trans
+                out_scale = 1.0 - 0.1 * trans
+                cr.translate(0.0, h / 2.0)
+                cr.scale(out_scale, out_scale)
+                cr.translate(0.0, -h / 2.0)
+                self.render_view(cr, prev, pill_x, pill_y, w, h, alpha=out_alpha)
+                cr.restore()
+
+                cr.save()
+                in_alpha = trans
+                in_scale = 0.9 + 0.1 * trans
+                cr.translate(0.0, h / 2.0)
+                cr.scale(in_scale, in_scale)
+                cr.translate(0.0, -h / 2.0)
+                self.render_view(cr, self._current_view, pill_x, pill_y, w, h, alpha=in_alpha)
+                cr.restore()
         else:
             self.render_view(cr, self._current_view, pill_x, pill_y, w, h, alpha=1.0)
 
@@ -4530,6 +4589,14 @@ class MainWindow(Gtk.Window):
         return max(0.0, min(1.0, 1.0 - (next_t - at) / 6.0))
 
     def render_media_big(self, cr: cairo.Context, px: float, py: float, pw: float, ph: float, alpha: float) -> None:
+        # Player background visuals (DotMatrix, StarField)
+        bg_mode = Settings.player_bg
+        levels = self._spectrum.levels
+        if bg_mode in (PLAYER_BG_STARS, PLAYER_BG_BOTH):
+            self._starfield.render(cr, px, py, pw, ph, alpha=0.75 * alpha, levels=levels)
+        if bg_mode in (PLAYER_BG_MATRIX, PLAYER_BG_BOTH):
+            self._dotmatrix.render(cr, px, py, pw, ph, alpha=0.85 * alpha, levels=levels, color=self._accent_color)
+
         cover_scale = max(0.5, min(1.0, self._cover_scale.value))
         art_size = 64.0 * cover_scale
         art_back = (64.0 - art_size) / 2.0
@@ -5057,6 +5124,13 @@ class MainWindow(Gtk.Window):
         }
         align_label = align_labels.get(Settings.align, "По центру")
         shape_label = "Чёлка" if Settings.notch else "Пилюля"
+        bg_labels = {
+            PLAYER_BG_GLOW: "Свечение",
+            PLAYER_BG_MATRIX: "Матрица",
+            PLAYER_BG_STARS: "Звёзды",
+            PLAYER_BG_BOTH: "Всё вместе",
+        }
+        bg_label = bg_labels.get(Settings.player_bg, "Свечение")
         rows = [
             (Glyph.Size, "Размер", f"{Settings.scale}%"),
             (Glyph.Gap, "Позиция Y (Отступ)", f"{Settings.pos_y} px"),
@@ -5071,6 +5145,7 @@ class MainWindow(Gtk.Window):
             (Glyph.Sparkle, "Сила стекла", f"{Settings.glass}%"),
             (Glyph.Lines, "Полоса трека", seek_style_label),
             (Glyph.Pulse, "Эквалайзер", eq_style_label),
+            (Glyph.Sparkle, "Фон плеера", bg_label),
             (Glyph.Drop, "Акцентный цвет", cur_accent_label),
         ]
         row_y_start, row_h, swatch_y = self.get_look_layout(ph)

@@ -68,6 +68,12 @@ COMBO_STYLES = (
     COMBO_STYLE_PROGRESS,
 )
 
+PLAYER_BG_GLOW = "glow"          # Свечение
+PLAYER_BG_MATRIX = "matrix"      # Матрица точек
+PLAYER_BG_STARS = "stars"        # Звёзды
+PLAYER_BG_BOTH = "both"          # Матрица и звёзды
+PLAYER_BGS = (PLAYER_BG_GLOW, PLAYER_BG_MATRIX, PLAYER_BG_STARS, PLAYER_BG_BOTH)
+
 COMBO_SPLIT_ALL = "all"          # Все варианты (комбинированный)
 COMBO_SPLIT_PUNCT = "punct"      # По знакам
 COMBO_SPLIT_WORDS = "words"      # По словам
@@ -420,6 +426,26 @@ class _SettingsMeta(type):
         if val not in ("ru", "en", "es", "de", "fr", "it", "pt", "zh", "ja", "uk"):
             val = "ru"
         cls._set("language", val)
+
+    @property
+    def player_bg(cls) -> str:
+        val = str(cls._data.get("player_bg", PLAYER_BG_GLOW)).lower()
+        return val if val in PLAYER_BGS else PLAYER_BG_GLOW
+
+    @player_bg.setter
+    def player_bg(cls, value: str) -> None:
+        val = str(value).lower()
+        if val not in PLAYER_BGS:
+            val = PLAYER_BG_GLOW
+        cls._set("player_bg", val)
+
+    @property
+    def PlayerBg(cls) -> str:
+        return cls.player_bg
+
+    @PlayerBg.setter
+    def PlayerBg(cls, value: str) -> None:
+        cls.player_bg = value
 
     @property
     def line_bar(cls) -> bool:
