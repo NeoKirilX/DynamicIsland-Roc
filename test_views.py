@@ -45,6 +45,7 @@ def test_views():
         "Settings",
         "Look",
         "TextAnim",
+        "Combo",
         "Shelf",
         "Update",
     ]

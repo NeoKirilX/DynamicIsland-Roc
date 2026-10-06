@@ -58,6 +58,7 @@ class Glyph(Enum):
     Cloud = auto()
     CloudRain = auto()
     CloudSnow = auto()
+    Music = auto()
 
 @dataclass(frozen=True)
 class Art:
@@ -232,6 +233,13 @@ ARTS: dict[Glyph, Art] = {
         solid="M7.5,16 H17 A3.5,3.5 0 0 0 17,9 A5,5 0 0 0 7.5,10 A3,3 0 0 0 7.5,16 Z",
         lines="M8,19.5 H8.01 M12,19.5 H12.01 M16,19.5 H16.01 M10,21.5 H10.01 M14,21.5 H14.01",
         line=2.4,
+    ),
+    Glyph.Music: Art(
+        "M7.2,15 A2.5,2.5 0 1 0 7.2,20 A2.5,2.5 0 1 0 7.2,15 Z "
+        "M16.6,13 A2.5,2.5 0 1 0 16.6,18 A2.5,2.5 0 1 0 16.6,13 Z "
+        "M9.2,5.4 L18.6,3.4 V6.8 L9.2,8.8 Z",
+        "M9.3,17.5 V6 M18.7,15.5 V4",
+        line=1.8,
     ),
 }
 

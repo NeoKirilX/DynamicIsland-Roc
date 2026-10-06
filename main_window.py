@@ -1230,7 +1230,7 @@ class MainWindow(Gtk.Window):
         elif self._current_view == View.SETTINGS:
             row_y_start, row_h = self.get_settings_layout(ph)
             hovered = None
-            for idx in range(14):
+            for idx in range(13):
                 ry = py + row_y_start + idx * row_h
                 if px + 10 <= lx <= px + pw - 10 and ry <= ly < ry + row_h:
                     hovered = idx
@@ -1562,7 +1562,6 @@ class MainWindow(Gtk.Window):
             setting_keys = [
                 "lyrics",
                 "lyric_effects",
-                "combo_panel",
                 "rim",
                 "app_volume",
                 "network",
@@ -1577,11 +1576,6 @@ class MainWindow(Gtk.Window):
                 key = setting_keys[idx]
                 ry = py + row_y_start + idx * row_h
                 if px <= lx <= px + pw and ry <= ly < ry + row_h:
-                    if key == "combo_panel":
-                        self.open_panel(Panel.COMBO)
-                        self.update_view()
-                        self.set_targets()
-                        return
                     cur = getattr(Settings, key)
                     setattr(Settings, key, not cur)
                     self._toggles[key].set_state(not cur, animate=True)
@@ -2168,7 +2162,7 @@ class MainWindow(Gtk.Window):
     def get_settings_layout(self, ph: float) -> tuple[float, float]:
         row_y_start = 44.0
         avail_for_rows = ph - row_y_start - 12.0
-        row_h = max(24.0, min(36.0, avail_for_rows / 14.0))
+        row_h = max(24.0, min(36.0, avail_for_rows / 13.0))
         return row_y_start, row_h
 
     def get_look_layout(self, ph: float) -> tuple[float, float, float]:
@@ -4849,7 +4843,6 @@ class MainWindow(Gtk.Window):
         rows = [
             (Glyph.Lines, "Текст песен", "lyrics"),
             (Glyph.Sparkle, "Эффекты текста", "lyric_effects"),
-            (Glyph.Pulse, "Комбо повторов", "combo_panel"),
             (Glyph.Rim, "Ободок острова", "rim"),
             (Glyph.Mid, "Громкость приложения", "app_volume"),
             (Glyph.Wifi, "Уведомления о сети", "network"),
@@ -4865,11 +4858,7 @@ class MainWindow(Gtk.Window):
             ry = py + row_y_start + idx * row_h
             render_icon(cr, glyph, px + 22.0, ry + (row_h - 17.0) / 2.0, 17.0, COLOR_DIM[:3], alpha=alpha)
             draw_text(cr, label, px + 49.0, ry + row_h / 2.0, font_size=13.0, bold=False, color=COLOR_WHITE, alpha=alpha, align="left", valign="center")
-            if key == "combo_panel":
-                status_lbl = "Вкл >" if Settings.combo_enabled else "Выкл >"
-                draw_text(cr, status_lbl, px + pw - 24.0, ry + row_h / 2.0, font_size=13.0, bold=False, color=COLOR_DIM[:3], alpha=alpha, align="right", valign="center")
-            else:
-                self._toggles[key].render(cr, px + pw - 58.0, ry + (row_h - 24.0) / 2.0, w=46.0, h=24.0)
+            self._toggles[key].render(cr, px + pw - 58.0, ry + (row_h - 24.0) / 2.0, w=46.0, h=24.0)
 
         # Row 9: Clear cache
         cache_ry = py + row_y_start + len(rows) * row_h
@@ -5151,7 +5140,7 @@ class MainWindow(Gtk.Window):
             (Glyph.Lines, "Порог повторов", "cycle", f"От {Settings.combo_min_repeats} раз"),
             (Glyph.Sparkle, "Стиль счётчика", "cycle", cur_style_lbl),
             (Glyph.Lines, "Режим разбивки", "cycle", cur_split_lbl),
-            (Glyph.Music, "Игнорировать эдлибы", "toggle", "combo_ignore_adlibs"),
+            (Glyph.Note, "Игнорировать эдлибы", "toggle", "combo_ignore_adlibs"),
             (Glyph.Look, "Очищать скобки", "toggle", "combo_strip_brackets"),
             (Glyph.Expand, "Минимум букв", "cycle", cur_len_lbl),
         ]
