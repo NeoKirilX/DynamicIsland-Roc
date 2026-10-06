@@ -394,6 +394,22 @@ class _SettingsMeta(type):
         cls.capitalize_title = value
 
     @property
+    def system_stats(cls) -> bool:
+        return cls._get_bool("system_stats", True)
+
+    @system_stats.setter
+    def system_stats(cls, value: bool) -> None:
+        cls._set("system_stats", bool(value))
+
+    @property
+    def SystemStats(cls) -> bool:
+        return cls.system_stats
+
+    @SystemStats.setter
+    def SystemStats(cls, value: bool) -> None:
+        cls.system_stats = value
+
+    @property
     def line_bar(cls) -> bool:
         return cls._get_bool("line_bar", False)
 

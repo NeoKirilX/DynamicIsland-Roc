@@ -59,6 +59,8 @@ class Glyph(Enum):
     CloudRain = auto()
     CloudSnow = auto()
     Music = auto()
+    Cpu = auto()
+    Ram = auto()
 
 @dataclass(frozen=True)
 class Art:
@@ -240,6 +242,14 @@ ARTS: dict[Glyph, Art] = {
         "M9.2,5.4 L18.6,3.4 V6.8 L9.2,8.8 Z",
         "M9.3,17.5 V6 M18.7,15.5 V4",
         line=1.8,
+    ),
+    Glyph.Cpu: Art(
+        lines="M6,6 H18 V18 H6 Z M9,2 V6 M15,2 V6 M9,18 V22 M15,18 V22 M2,9 H6 M2,15 H6 M18,9 H22 M18,15 H22 M9.5,9.5 H14.5 V14.5 H9.5 Z",
+        line=1.6,
+    ),
+    Glyph.Ram: Art(
+        lines="M3,7 H21 V17 H3 Z M6,17 V20 M10,17 V20 M14,17 V20 M18,17 V20 M6,10 H9 V13 H6 Z M11,10 H14 V13 H11 Z M16,10 H19 V13 H16 Z",
+        line=1.6,
     ),
 }
 

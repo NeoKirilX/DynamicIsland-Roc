@@ -91,6 +91,7 @@ from skip import Skip
 from updater import Updater, UpdateState
 from privacy_service import PrivacyService, PrivacyState
 from weather_service import WeatherService, WeatherInfo
+from system_service import SystemService, SystemInfo
 
 try:
     from PIL import Image
@@ -462,6 +463,7 @@ class MainWindow(Gtk.Window):
         self._alarm = Alarm()
         self._privacy = PrivacyService(on_changed=self.on_privacy_changed)
         self._weather = WeatherService(on_changed=self.on_weather_changed)
+        self._system = SystemService()
 
         self._goo = Goo()
         self._cover_small = Cover()
@@ -486,6 +488,8 @@ class MainWindow(Gtk.Window):
         self._digits_info_vol = Digits("0%", down=True)
         self._digits_info_headset = Digits("0%", down=True)
         self._digits_info_battery = Digits("100%", down=True)
+        self._digits_info_cpu = Digits("0%", down=True)
+        self._digits_info_ram = Digits("0%", down=True)
         self._digits_pos = Digits("0:00", down=False)
         self._digits_rem = Digits("-0:00", down=True)
         self._digits_player_vol = Digits("100%", down=True)
@@ -527,6 +531,7 @@ class MainWindow(Gtk.Window):
             "network": Toggle(Settings.network),
             "privacy_indicators": Toggle(Settings.privacy_indicators),
             "weather": Toggle(Settings.weather),
+            "system_stats": Toggle(Settings.system_stats),
             "hide_fullscreen": Toggle(Settings.hide_fullscreen),
             "click_lock": Toggle(Settings.click_lock),
             "autostart": Toggle(Settings.autostart),
@@ -1465,6 +1470,16 @@ class MainWindow(Gtk.Window):
                 self.set_targets()
                 return
 
+        if self._current_view == View.IDLE_BIG:
+            if px + 20 <= lx <= px + 220 and py + 90 <= ly <= py + 125:
+                threading.Thread(target=self._weather.fetch_weather_now, daemon=True).start()
+                play_sound("click")
+                return
+            self.open_panel(Panel.NONE)
+            self.update_view()
+            self.set_targets()
+            return
+
         if self._current_view == View.TIMER:
             self.open_panel(Panel.TIMER)
             self.update_view()
@@ -1568,6 +1583,7 @@ class MainWindow(Gtk.Window):
                 "network",
                 "privacy_indicators",
                 "weather",
+                "system_stats",
                 "hide_fullscreen",
                 "click_lock",
                 "autostart",
@@ -2163,7 +2179,7 @@ class MainWindow(Gtk.Window):
     def get_settings_layout(self, ph: float) -> tuple[float, float]:
         row_y_start = 44.0
         avail_for_rows = ph - row_y_start - 12.0
-        row_h = max(24.0, min(36.0, avail_for_rows / 13.0))
+        row_h = max(24.0, min(36.0, avail_for_rows / 14.0))
         return row_y_start, row_h
 
     def get_look_layout(self, ph: float) -> tuple[float, float, float]:
@@ -2494,6 +2510,8 @@ class MainWindow(Gtk.Window):
         moving |= self._digits_info_vol.tick(dt)
         moving |= self._digits_info_headset.tick(dt)
         moving |= self._digits_info_battery.tick(dt)
+        moving |= self._digits_info_cpu.tick(dt)
+        moving |= self._digits_info_ram.tick(dt)
         moving |= self._digits_pos.tick(dt)
         moving |= self._digits_rem.tick(dt)
         moving |= self._digits_player_vol.tick(dt)
@@ -4585,18 +4603,27 @@ class MainWindow(Gtk.Window):
             draw_text(cr, weather_text, px + 47.0, py + 106.0, font_size=12.0, bold=False, color=COLOR_DIM[:3], alpha=alpha, align="left", valign="center")
 
         rx = px + pw - 24.0
-        render_icon(cr, Glyph.Loud, rx - 54.0, py + 32.0, 16.0, COLOR_DIM[:3], alpha=alpha)
+        stat_items: list[tuple[Any, str, Digits, bool]] = []
         vol_pct = int(round(max(0.0, self._last_volume) * 100))
-        self._digits_info_vol.set_text(f"{vol_pct}%")
-        self._digits_info_vol.render(cr, rx, py + 40.0, font_size=13.0, color=(1.0, 1.0, 1.0, alpha), align="right", valign="center")
+        stat_items.append((Glyph.Loud, f"{vol_pct}%", self._digits_info_vol, False))
 
         if self._headset_pct >= 0:
-            render_icon(cr, Glyph.Headphones, rx - 54.0, py + 58.0, 16.0, COLOR_DIM[:3], alpha=alpha)
-            self._digits_info_headset.render(cr, rx, py + 66.0, font_size=13.0, color=(1.0, 1.0, 1.0, alpha), align="right", valign="center")
+            stat_items.append((Glyph.Headphones, f"{self._headset_pct}%", self._digits_info_headset, False))
 
         if self._battery_known:
-            render_icon(cr, Glyph.Battery, rx - 54.0, py + 84.0, 16.0, COLOR_DIM[:3], alpha=alpha)
-            self._digits_info_battery.render(cr, rx, py + 92.0, font_size=13.0, color=(COLOR_GREEN[0], COLOR_GREEN[1], COLOR_GREEN[2], alpha) if self._last_plugged else (1.0, 1.0, 1.0, alpha), align="right", valign="center")
+            stat_items.append((Glyph.Battery, f"{self._last_battery}%", self._digits_info_battery, bool(self._last_plugged)))
+
+        if Settings.system_stats:
+            stat_items.append((Glyph.Cpu, f"{self._system.cpu_percent}%", self._digits_info_cpu, False))
+            stat_items.append((Glyph.Ram, f"{self._system.ram_percent}%", self._digits_info_ram, False))
+
+        y_cursor = py + 32.0
+        for g, val_str, dig, is_plugged in stat_items:
+            render_icon(cr, g, rx - 54.0, y_cursor, 16.0, COLOR_DIM[:3], alpha=alpha)
+            col = (COLOR_GREEN[0], COLOR_GREEN[1], COLOR_GREEN[2], alpha) if is_plugged else (1.0, 1.0, 1.0, alpha)
+            dig.set_text(val_str)
+            dig.render(cr, rx, y_cursor + 8.0, font_size=13.0, color=col, align="right", valign="center")
+            y_cursor += 25.0
 
     def render_focus(self, cr: cairo.Context, px: float, py: float, pw: float, ph: float, alpha: float) -> None:
         if alpha <= 0.001:
@@ -4912,6 +4939,7 @@ class MainWindow(Gtk.Window):
             (Glyph.Wifi, "Уведомления о сети", "network"),
             (Glyph.Mic, "Индикаторы приватности", "privacy_indicators"),
             (Glyph.Sun, "Виджет погоды", "weather"),
+            (Glyph.Cpu, "Мониторинг системы", "system_stats"),
             (Glyph.Expand, "Скрывать на полном экране", "hide_fullscreen"),
             (Glyph.Clock, "Задержка при анимации", "click_lock"),
             (Glyph.Linux, "Запускать при старте", "autostart"),
