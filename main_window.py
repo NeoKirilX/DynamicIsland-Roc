@@ -4496,7 +4496,7 @@ class MainWindow(Gtk.Window):
         cr.stroke()
         draw_text(cr, "+5м", b5_x + 19.0, py + ph / 2.0, font_size=11.5, bold=True, color=COLOR_WHITE, alpha=alpha, align="center", valign="center")
 
-        status_prefix = "На паузе" if not self._timer.running else ("Завершается! 🔔" if self._timer.is_urgent else "Идёт отсчёт")
+        status_prefix = "На паузе" if not self._timer.running else ("Завершается!" if self._timer.is_urgent else "Идёт отсчёт")
         draw_text(cr, f"{status_prefix} · {format_time(self._timer.total)}", px + pw - 20.0, py + 25.0, font_size=11.5, color=self._timer_tint, alpha=0.85 * alpha, align="right", valign="center")
         if self._timer.active and self._digits_big_timer.text != self._timer.formatted:
             self._digits_big_timer.set_text(self._timer.formatted)
@@ -4519,7 +4519,7 @@ class MainWindow(Gtk.Window):
             human_str = f"{self._minutes} минут"
         draw_text(cr, human_str, px + pw / 2.0, py + 80.0, font_size=11.0, color=COLOR_DIM[:3], alpha=0.8 * alpha, align="center", valign="center")
 
-        presets = [(1, "1м"), (5, "5м"), (15, "15м"), (25, "25м 🍅"), (60, "1ч")]
+        presets = [(1, "1м"), (5, "5м"), (15, "15м"), (25, "25м"), (60, "1ч")]
         chip_y = py + 98.0
         chip_h = 28.0
         chip_w = (pw - 28.0) / len(presets)
@@ -4723,7 +4723,7 @@ class MainWindow(Gtk.Window):
                 cr.set_line_width(1.0)
                 cr.stroke()
                 cr.restore()
-                draw_text(cr, "↺ Откат", btn_r_x + btn_r_w / 2.0, ry + row_h / 2.0, font_size=10.5, bold=False, color=(1.0, 0.65, 0.5), alpha=alpha, align="center", valign="center")
+                draw_text(cr, "Откат", btn_r_x + btn_r_w / 2.0, ry + row_h / 2.0, font_size=11.0, bold=False, color=(1.0, 0.65, 0.5), alpha=alpha, align="center", valign="center")
 
                 btn_ok_x = px + 289.0
                 btn_ok_w = 46.0
@@ -4737,7 +4737,7 @@ class MainWindow(Gtk.Window):
                 cr.set_line_width(1.0)
                 cr.stroke()
                 cr.restore()
-                draw_text(cr, "✓ OK", btn_ok_x + btn_ok_w / 2.0, ry + row_h / 2.0, font_size=10.5, bold=True, color=COLOR_WHITE, alpha=alpha, align="center", valign="center")
+                draw_text(cr, "OK", btn_ok_x + btn_ok_w / 2.0, ry + row_h / 2.0, font_size=11.0, bold=True, color=COLOR_WHITE, alpha=alpha, align="center", valign="center")
                 continue
 
             render_icon(cr, glyph, px + 22.0, ry + (row_h - 17.0) / 2.0, 17.0, COLOR_DIM[:3], alpha=alpha)
