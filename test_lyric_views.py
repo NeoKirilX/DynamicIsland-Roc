@@ -280,33 +280,43 @@ def on_activate(application) -> None:
 
     print("\n[compact island] parenthesized repeated phrases stripped and comboed")
     paren_lines = [
-        (10.0, "(Я не болен, я не болен)"),
-        (14.0, "(Я не болен, я не болен)"),
-        (18.0, "(Я не болен, я не болен)"),
+        (10.0, "(Светит солнце, светит солнце)"),
+        (14.0, "(Светит солнце, светит солнце)"),
+        (18.0, "(Светит солнце, светит солнце)"),
         (22.0, "Конец"),
     ]
     p_lines = MainWindow._process_compact_lines(paren_lines, 30.0)
     check(len(p_lines) == 7, f"parenthesized lines split into 6 combo items + 1 end (got {len(p_lines)})")
-    check(p_lines[0][1] == "Я не болен х1", f"brackets trimmed on combo 1: {p_lines[0][1]!r}")
-    check(p_lines[1][1] == "я не болен х2", f"brackets trimmed on combo 2: {p_lines[1][1]!r}")
-    check(p_lines[5][1] == "я не болен х6", f"brackets trimmed on combo 6: {p_lines[5][1]!r}")
+    check(p_lines[0][1] == "Светит солнце х1", f"brackets trimmed on combo 1: {p_lines[0][1]!r}")
+    check(p_lines[1][1] == "светит солнце х2", f"brackets trimmed on combo 2: {p_lines[1][1]!r}")
+    check(p_lines[5][1] == "светит солнце х6", f"brackets trimmed on combo 6: {p_lines[5][1]!r}")
     check("(" not in p_lines[0][1] and ")" not in p_lines[0][1], "no parentheses in combo text")
 
     print("\n[compact island] ad-lib interjections like (у) do not break combo chain")
     adlib_lines = [
-        (0.0, "переломай мои кости"),
-        (2.0, "переломай мои кости"),
-        (4.0, "переломай мои кости (у)"),
-        (6.0, "переломай мои кости"),
-        (8.0, "переломай мои кости"),
+        (0.0, "едем дальше"),
+        (2.0, "едем дальше"),
+        (4.0, "едем дальше (у)"),
+        (6.0, "едем дальше"),
+        (8.0, "едем дальше"),
     ]
     adlib_res = MainWindow._process_compact_lines(adlib_lines, 12.0)
     check(len(adlib_res) == 5, f"all 5 lines comboed despite (у) (got {len(adlib_res)})")
-    check(adlib_res[0][1] == "переломай мои кости х1", f"line 0 is x1: {adlib_res[0][1]!r}")
-    check(adlib_res[1][1] == "переломай мои кости х2", f"line 1 is x2: {adlib_res[1][1]!r}")
-    check(adlib_res[2][1] == "переломай мои кости (у) х3", f"line 2 has (у) x3: {adlib_res[2][1]!r}")
-    check(adlib_res[3][1] == "переломай мои кости х4", f"line 3 is x4: {adlib_res[3][1]!r}")
-    check(adlib_res[4][1] == "переломай мои кости х5", f"line 4 is x5: {adlib_res[4][1]!r}")
+    check(adlib_res[0][1] == "едем дальше х1", f"line 0 is x1: {adlib_res[0][1]!r}")
+    check(adlib_res[1][1] == "едем дальше х2", f"line 1 is x2: {adlib_res[1][1]!r}")
+    check(adlib_res[2][1] == "едем дальше (у) х3", f"line 2 has (у) x3: {adlib_res[2][1]!r}")
+    check(adlib_res[3][1] == "едем дальше х4", f"line 3 is x4: {adlib_res[3][1]!r}")
+    check(adlib_res[4][1] == "едем дальше х5", f"line 4 is x5: {adlib_res[4][1]!r}")
+
+    print("\n[compact island] single line repeated words with trailing word combo correctly")
+    single_line = [(0.0, "быстро, быстро, быстро, быстро, ай")]
+    single_res = MainWindow._process_compact_lines(single_line, 5.0)
+    check(len(single_res) == 5, f"single line split into 4 combo items + 1 trailing word (got {len(single_res)})")
+    check(single_res[0][1] == "быстро х1", f"part 0 is x1: {single_res[0][1]!r}")
+    check(single_res[1][1] == "быстро х2", f"part 1 is x2: {single_res[1][1]!r}")
+    check(single_res[2][1] == "быстро х3", f"part 2 is x3: {single_res[2][1]!r}")
+    check(single_res[3][1] == "быстро х4", f"part 3 is x4: {single_res[3][1]!r}")
+    check(single_res[4][1] == "ай", f"part 4 is trailing word: {single_res[4][1]!r}")
 
     print()
     if FAILURES:

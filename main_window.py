@@ -2741,10 +2741,30 @@ class MainWindow(Gtk.Window):
         if (s.startswith("(") and s.endswith(")")) or (s.startswith("[") and s.endswith("]")) or (s.startswith("{") and s.endswith("}")):
             s = s[1:-1].strip()
         parts = [cls._clean_phrase(p) for p in re.split(r'[,;!?]+\s*', s) if cls._clean_phrase(p)]
+        if len(parts) <= 1:
+            words = [cls._clean_phrase(w) for w in s.split() if cls._clean_phrase(w)]
+            if len(words) > 1:
+                parts = words
+
         if len(parts) > 1:
             norm0 = cls._normalize_phrase(parts[0])
             if norm0 and all(cls._normalize_phrase(p) == norm0 for p in parts):
                 return parts
+
+            has_combo_run = False
+            run_len = 1
+            for k in range(1, len(parts)):
+                if cls._normalize_phrase(parts[k]) == cls._normalize_phrase(parts[k - 1]):
+                    run_len += 1
+                    if run_len >= 2:
+                        has_combo_run = True
+                        break
+                else:
+                    run_len = 1
+
+            if has_combo_run:
+                return parts
+
         clean_full = cls._clean_phrase(text)
         return [clean_full] if clean_full else []
 
@@ -2752,10 +2772,10 @@ class MainWindow(Gtk.Window):
     def _process_compact_lines(cls, raw_lines: list[tuple[float, str]], duration: float) -> list[tuple[float, str]]:
         if not raw_lines:
             return []
-        expanded: list[tuple[float, str, float, bool, str]] = []
+        expanded: list[tuple[float, str, float, bool, str, int]] = []
         for idx, (t, txt) in enumerate(raw_lines):
             if not txt.strip():
-                expanded.append((t, txt, 0.0, False, txt))
+                expanded.append((t, txt, 0.0, False, txt, idx))
                 continue
             parts = cls._split_phrase_line(txt)
             next_t = raw_lines[idx + 1][0] if idx + 1 < len(raw_lines) else max(duration, t + 4.0)
@@ -2764,9 +2784,37 @@ class MainWindow(Gtk.Window):
             if len(parts) > 1:
                 step = line_span / len(parts)
                 for k, p in enumerate(parts):
-                    expanded.append((round(t + k * step, 3), p, round(step, 3), True, txt))
+                    expanded.append((round(t + k * step, 3), p, round(step, 3), True, txt, idx))
             else:
-                expanded.append((t, txt, round(line_span, 3), False, txt))
+                expanded.append((t, txt, round(line_span, 3), False, txt, idx))
+
+        lines_with_combos: set[int] = set()
+        i = 0
+        while i < len(expanded):
+            txt = expanded[i][1]
+            if not txt.strip():
+                i += 1
+                continue
+            norm = cls._normalize_phrase(txt)
+            j = i
+            while j < len(expanded):
+                cur_norm = cls._normalize_phrase(expanded[j][1])
+                if cur_norm == norm:
+                    j += 1
+                elif (
+                    j + 1 < len(expanded)
+                    and cls._normalize_phrase(expanded[j + 1][1]) == norm
+                    and (len(cls._clean_phrase(expanded[j][1])) <= 4 or (expanded[j][1].strip().startswith("(") and expanded[j][1].strip().endswith(")")))
+                ):
+                    j += 1
+                else:
+                    break
+            if j - i >= 3:
+                for k in range(i, j):
+                    lines_with_combos.add(expanded[k][5])
+                i = j
+            else:
+                i += 1
 
         result: list[tuple[float, str]] = []
         i = 0
@@ -2805,16 +2853,23 @@ class MainWindow(Gtk.Window):
             else:
                 k = i
                 while k < j:
+                    sub_t = expanded[k][0]
+                    sub_txt = expanded[k][1]
+                    is_split = expanded[k][3]
                     orig_txt = expanded[k][4]
-                    orig_t = expanded[k][0]
-                    if expanded[k][3]:
+                    line_idx = expanded[k][5]
+
+                    if is_split and line_idx in lines_with_combos:
+                        result.append((sub_t, sub_txt))
+                        k += 1
+                    elif is_split:
                         m = k
-                        while m < j and expanded[m][3] and expanded[m][4] == orig_txt:
+                        while m < j and expanded[m][3] and expanded[m][5] == line_idx:
                             m += 1
-                        result.append((orig_t, orig_txt))
+                        result.append((sub_t, orig_txt))
                         k = m
                     else:
-                        result.append((orig_t, orig_txt))
+                        result.append((sub_t, orig_txt))
                         k += 1
                 i = j
 
