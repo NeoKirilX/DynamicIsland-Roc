@@ -51,28 +51,44 @@ ANIM_STYLE_BOUNCE = "bounce"
 ANIM_STYLE_SLIDE = "slide"
 ANIM_STYLES = (ANIM_STYLE_LETTERS, ANIM_STYLE_WAVE, ANIM_STYLE_BOUNCE, ANIM_STYLE_SLIDE)
 
-COMBO_STYLE_RU_X = "ru_x"        # х1
-COMBO_STYLE_EN_X = "en_x"        # x1
-COMBO_STYLE_TIMES = "times"      # ×1
-COMBO_STYLE_BRACKETS = "brackets"# (1)
-COMBO_STYLE_HASH = "hash"        # #1
-COMBO_STYLES = (COMBO_STYLE_RU_X, COMBO_STYLE_EN_X, COMBO_STYLE_TIMES, COMBO_STYLE_BRACKETS, COMBO_STYLE_HASH)
+COMBO_STYLE_RU_X = "ru_x"            # х1
+COMBO_STYLE_EN_X = "en_x"            # x1
+COMBO_STYLE_TIMES = "times"          # ×1
+COMBO_STYLE_BRACKETS = "brackets"    # (1)
+COMBO_STYLE_SQUARE = "square"        # [1]
+COMBO_STYLE_HASH = "hash"            # #1
+COMBO_STYLE_PROGRESS = "progress"    # 1/4
+COMBO_STYLES = (
+    COMBO_STYLE_RU_X,
+    COMBO_STYLE_EN_X,
+    COMBO_STYLE_TIMES,
+    COMBO_STYLE_BRACKETS,
+    COMBO_STYLE_SQUARE,
+    COMBO_STYLE_HASH,
+    COMBO_STYLE_PROGRESS,
+)
 
 COMBO_SPLIT_PUNCT = "punct"      # По знакам
 COMBO_SPLIT_WORDS = "words"      # По словам
 COMBO_SPLIT_LINES = "lines"      # Только строки
 COMBO_SPLITS = (COMBO_SPLIT_PUNCT, COMBO_SPLIT_WORDS, COMBO_SPLIT_LINES)
 
-def format_combo_badge(phrase: str, count: int, style: str = COMBO_STYLE_RU_X) -> str:
+def format_combo_badge(phrase: str, count: int, style: str = COMBO_STYLE_RU_X, total: int = 0) -> str:
     if style == COMBO_STYLE_EN_X:
-        return f"{phrase} x{count}"
+        badge = f"x{count}"
     elif style == COMBO_STYLE_TIMES:
-        return f"{phrase} ×{count}"
+        badge = f"×{count}"
     elif style == COMBO_STYLE_BRACKETS:
-        return f"{phrase} ({count})"
+        badge = f"({count})"
+    elif style == COMBO_STYLE_SQUARE:
+        badge = f"[{count}]"
     elif style == COMBO_STYLE_HASH:
-        return f"{phrase} #{count}"
-    return f"{phrase} х{count}"
+        badge = f"#{count}"
+    elif style == COMBO_STYLE_PROGRESS and total > 0:
+        badge = f"{count}/{total}"
+    else:
+        badge = f"х{count}"
+    return f"{phrase} {badge}" if phrase else badge
 
 class _SettingsMeta(type):
 
@@ -207,6 +223,22 @@ class _SettingsMeta(type):
     @combo_strip_brackets.setter
     def combo_strip_brackets(cls, value: bool) -> None:
         cls._set("combo_strip_brackets", bool(value))
+
+    @property
+    def combo_min_word_len(cls) -> int:
+        return max(1, min(5, cls._get_int("combo_min_word_len", 2)))
+
+    @combo_min_word_len.setter
+    def combo_min_word_len(cls, value: int) -> None:
+        cls._set("combo_min_word_len", max(1, min(5, int(value))))
+
+    @property
+    def combo_badge_accent(cls) -> bool:
+        return cls._get_bool("combo_badge_accent", True)
+
+    @combo_badge_accent.setter
+    def combo_badge_accent(cls, value: bool) -> None:
+        cls._set("combo_badge_accent", bool(value))
 
     @property
     def LyricEffects(cls) -> bool:

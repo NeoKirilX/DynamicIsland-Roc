@@ -68,7 +68,9 @@ from settings import (
     COMBO_STYLE_EN_X,
     COMBO_STYLE_TIMES,
     COMBO_STYLE_BRACKETS,
+    COMBO_STYLE_SQUARE,
     COMBO_STYLE_HASH,
+    COMBO_STYLE_PROGRESS,
     COMBO_STYLES,
     COMBO_SPLIT_PUNCT,
     COMBO_SPLIT_WORDS,
@@ -146,7 +148,7 @@ COLOR_INDIGO: Tuple[float, float, float] = (0.49, 0.478, 1.0)
 CARRY_TIMER: float = 78.0
 CARRY_SHELF: float = 54.0
 
-SETTINGS_HEIGHT = 460.0
+SETTINGS_HEIGHT = 490.0
 
 SIZES: dict[View, Dims] = {
     View.IDLE: Dims(118, 34, 17),
@@ -164,8 +166,8 @@ SIZES: dict[View, Dims] = {
     View.MENU: Dims(300, 248, 34),
     View.SETTINGS: Dims(320, SETTINGS_HEIGHT, 34),
     View.LOOK: Dims(LOOK_WIDTH, LOOK_HEIGHT, 34),
-    View.TEXT_ANIM: Dims(320, 390, 34),
-    View.COMBO: Dims(320, 420, 34),
+    View.TEXT_ANIM: Dims(320, 420, 34),
+    View.COMBO: Dims(320, 440, 34),
     View.SHELF: Dims(380, 136, 34),
     View.UPDATE: Dims(340, 230, 34),
 }
@@ -491,13 +493,16 @@ class MainWindow(Gtk.Window):
         self._cache_feedback_until: float = 0.0
 
         self._preview_lines = [
-            "♪ Музыка и текст",
-            "♫ Посимвольный вылет",
-            "♪ Плавная кинематика",
-            "♫ Динамический остров",
+            "Музыка и текст",
+            "Посимвольный вылет",
+            "Плавная кинематика",
+            "Динамический остров",
+            "Светит яркое солнце",
         ]
         self._preview_idx = 0
         self._preview_switch_time = time.monotonic() + 2.2
+        self._combo_preview_switch_time = time.monotonic() + 1.8
+        self._combo_preview_step = 1
         self._preview_enter = Spring(1.0, 220.0, 26.0)
         self._preview_prev_alpha = Spring(0.0, 220.0, 26.0)
         self._preview_prev_text = ""
@@ -1202,7 +1207,7 @@ class MainWindow(Gtk.Window):
         elif self._current_view == View.SETTINGS:
             row_y_start, row_h = self.get_settings_layout(ph)
             hovered = None
-            for idx in range(11):
+            for idx in range(12):
                 ry = py + row_y_start + idx * row_h
                 if px + 10 <= lx <= px + pw - 10 and ry <= ly < ry + row_h:
                     hovered = idx
@@ -1243,7 +1248,7 @@ class MainWindow(Gtk.Window):
             row_y_start = 104.0
             row_h = 42.0
             hovered = None
-            for idx in range(6):
+            for idx in range(7):
                 ry = py + row_y_start + idx * row_h
                 if px + 10 <= lx <= px + pw - 10 and ry <= ly < ry + row_h:
                     hovered = idx
@@ -1514,6 +1519,7 @@ class MainWindow(Gtk.Window):
             setting_keys = [
                 "lyrics",
                 "lyric_effects",
+                "combo_panel",
                 "rim",
                 "app_volume",
                 "network",
@@ -1522,10 +1528,15 @@ class MainWindow(Gtk.Window):
                 "autostart",
                 "capitalize_title",
             ]
-            for idx in range(9):
+            for idx in range(len(setting_keys)):
                 key = setting_keys[idx]
                 ry = py + row_y_start + idx * row_h
                 if px <= lx <= px + pw and ry <= ly < ry + row_h:
+                    if key == "combo_panel":
+                        self.open_panel(Panel.COMBO)
+                        self.update_view()
+                        self.set_targets()
+                        return
                     cur = getattr(Settings, key)
                     setattr(Settings, key, not cur)
                     self._toggles[key].set_state(not cur, animate=True)
@@ -1540,7 +1551,7 @@ class MainWindow(Gtk.Window):
                     self.area.queue_draw()
                     return
 
-            cache_ry = py + row_y_start + 9 * row_h
+            cache_ry = py + row_y_start + len(setting_keys) * row_h
             if px <= lx <= px + pw and cache_ry <= ly < cache_ry + row_h:
                 clear_all_cache()
                 self._cache_feedback_until = time.monotonic() + 2.5
@@ -1548,7 +1559,7 @@ class MainWindow(Gtk.Window):
                 self.area.queue_draw()
                 return
 
-            upd_ry = py + row_y_start + 10 * row_h
+            upd_ry = py + row_y_start + (len(setting_keys) + 1) * row_h
             if px <= lx <= px + pw and upd_ry <= ly < upd_ry + row_h:
                 self.open_panel(Panel.UPDATE)
                 self._updater.check_async()
@@ -1726,33 +1737,55 @@ class MainWindow(Gtk.Window):
                 self.set_targets()
                 return
 
+            box_x = px + 18.0
+            box_y = py + 42.0
+            box_w = pw - 36.0
+            box_h = 50.0
+            if box_x <= lx <= box_x + box_w and box_y <= ly <= box_y + box_h:
+                self._combo_preview_step = 1
+                max_reps = max(2, Settings.combo_min_repeats + 1)
+                txt = format_combo_badge("Едем дальше", 1, Settings.combo_counter_style, max_reps) if Settings.combo_enabled else "Едем дальше (без комбо)"
+                self._preview_prev_text = self._preview_text
+                self._preview_text = txt
+                self._preview_prev_alpha.value = 1.0
+                self._preview_prev_alpha.target = 0.0
+                self._preview_enter.value = 0.0
+                self._preview_enter.target = 1.0
+                play_sound("click")
+                self.area.queue_draw()
+                return
+
             row_y_start = 104.0
             row_h = 42.0
             if px <= lx <= px + pw:
-                for idx in range(6):
+                for idx in range(7):
                     ry = py + row_y_start + idx * row_h
                     if ry <= ly < ry + row_h:
                         if idx == 0:
                             Settings.combo_enabled = not Settings.combo_enabled
                             self._toggles["combo_enabled"].set_state(Settings.combo_enabled, animate=True)
                         elif idx == 1:
-                            reps = [2, 3, 4]
+                            reps = [2, 3, 4, 5]
                             cur = reps.index(Settings.combo_min_repeats) if Settings.combo_min_repeats in reps else 1
                             Settings.combo_min_repeats = reps[(cur + 1) % len(reps)]
                         elif idx == 2:
-                            splits = [COMBO_SPLIT_PUNCT, COMBO_SPLIT_WORDS, COMBO_SPLIT_LINES]
-                            cur = splits.index(Settings.combo_split_mode) if Settings.combo_split_mode in splits else 0
-                            Settings.combo_split_mode = splits[(cur + 1) % len(splits)]
-                        elif idx == 3:
                             styles = list(COMBO_STYLES)
                             cur = styles.index(Settings.combo_counter_style) if Settings.combo_counter_style in styles else 0
                             Settings.combo_counter_style = styles[(cur + 1) % len(styles)]
+                        elif idx == 3:
+                            splits = [COMBO_SPLIT_PUNCT, COMBO_SPLIT_WORDS, COMBO_SPLIT_LINES]
+                            cur = splits.index(Settings.combo_split_mode) if Settings.combo_split_mode in splits else 0
+                            Settings.combo_split_mode = splits[(cur + 1) % len(splits)]
                         elif idx == 4:
                             Settings.combo_ignore_adlibs = not Settings.combo_ignore_adlibs
                             self._toggles["combo_ignore_adlibs"].set_state(Settings.combo_ignore_adlibs, animate=True)
                         elif idx == 5:
                             Settings.combo_strip_brackets = not Settings.combo_strip_brackets
                             self._toggles["combo_strip_brackets"].set_state(Settings.combo_strip_brackets, animate=True)
+                        elif idx == 6:
+                            lens = [1, 2, 3, 4]
+                            cur = lens.index(Settings.combo_min_word_len) if Settings.combo_min_word_len in lens else 1
+                            Settings.combo_min_word_len = lens[(cur + 1) % len(lens)]
 
                         self._compact_lines_cache = None
                         play_sound("click")
@@ -2075,7 +2108,7 @@ class MainWindow(Gtk.Window):
     def get_settings_layout(self, ph: float) -> tuple[float, float]:
         row_y_start = 44.0
         avail_for_rows = ph - row_y_start - 12.0
-        row_h = max(26.0, min(38.0, avail_for_rows / 11.0))
+        row_h = max(24.0, min(36.0, avail_for_rows / 12.0))
         return row_y_start, row_h
 
     def get_look_layout(self, ph: float) -> tuple[float, float, float]:
@@ -2101,8 +2134,8 @@ class MainWindow(Gtk.Window):
             return d.with_h(PLAYER_HEIGHT + self._player_lyric_h)
         if view == View.SETTINGS:
             scale_val = max(0.01, self._size.value)
-            max_screen_h = (self.win_height - 60.0) / scale_val if self.win_height > 200 else 460.0
-            settings_h = max(340.0, min(460.0, max_screen_h))
+            max_screen_h = (self.win_height - 60.0) / scale_val if self.win_height > 200 else 490.0
+            settings_h = max(360.0, min(490.0, max_screen_h))
             return Dims(320.0, settings_h, 34)
         if view == View.LOOK:
             scale_val = max(0.01, self._size.value)
@@ -2111,8 +2144,8 @@ class MainWindow(Gtk.Window):
             return Dims(LOOK_WIDTH, look_h, 34)
         if view == View.COMBO:
             scale_val = max(0.01, self._size.value)
-            max_screen_h = (self.win_height - 60.0) / scale_val if self.win_height > 200 else 430.0
-            combo_h = max(340.0, min(430.0, max_screen_h))
+            max_screen_h = (self.win_height - 60.0) / scale_val if self.win_height > 200 else 440.0
+            combo_h = max(340.0, min(440.0, max_screen_h))
             return Dims(320.0, combo_h, 34)
         return d
 
@@ -2333,11 +2366,44 @@ class MainWindow(Gtk.Window):
 
         if self._current_view == View.TEXT_ANIM:
             spd = Settings.lyric_anim_speed / 100.0
+            moving = True
             moving |= self._preview_enter.advance(dt * spd)
             moving |= self._preview_prev_alpha.advance(dt * spd)
             moving |= self._row_list_text_anim.tick(dt)
-            if self._preview_prev_alpha.value <= 0.0:
+            if self._preview_prev_alpha.value <= 0.001:
                 self._preview_prev_text = ""
+            if now >= self._preview_switch_time:
+                self._preview_switch_time = now + 2.5
+                self._preview_prev_text = self._preview_text or self._preview_lines[self._preview_idx]
+                self._preview_idx = (self._preview_idx + 1) % len(self._preview_lines)
+                self._preview_text = self._preview_lines[self._preview_idx]
+                self._preview_prev_alpha.value = 1.0
+                self._preview_prev_alpha.target = 0.0
+                self._preview_enter.value = 0.0
+                self._preview_enter.target = 1.0
+
+        elif self._current_view == View.COMBO:
+            spd = Settings.lyric_anim_speed / 100.0
+            moving = True
+            moving |= self._preview_enter.advance(dt * spd)
+            moving |= self._preview_prev_alpha.advance(dt * spd)
+            moving |= self._row_list_combo.tick(dt)
+            if self._preview_prev_alpha.value <= 0.001:
+                self._preview_prev_text = ""
+            if now >= self._combo_preview_switch_time:
+                self._combo_preview_switch_time = now + 1.8
+                max_reps = max(2, Settings.combo_min_repeats + 1)
+                self._combo_preview_step = (self._combo_preview_step % max_reps) + 1
+                if Settings.combo_enabled:
+                    txt = format_combo_badge("Едем дальше", self._combo_preview_step, Settings.combo_counter_style, max_reps)
+                else:
+                    txt = "Едем дальше (без комбо)"
+                self._preview_prev_text = self._preview_text or txt
+                self._preview_text = txt
+                self._preview_prev_alpha.value = 1.0
+                self._preview_prev_alpha.target = 0.0
+                self._preview_enter.value = 0.0
+                self._preview_enter.target = 1.0
 
         if self._current_view in (View.MEDIA, View.TOAST, View.MEDIA_BIG):
             bands = self._spectrum.get_bands()
@@ -2960,7 +3026,7 @@ class MainWindow(Gtk.Window):
                 for k in range(i, j):
                     sub_t, sub_txt = expanded[k][0], expanded[k][1]
                     clean_sub = cls._clean_phrase(sub_txt)
-                    result.append((sub_t, format_combo_badge(clean_sub, combo_idx, c_style)))
+                    result.append((sub_t, format_combo_badge(clean_sub, combo_idx, c_style, total=count)))
                     combo_idx += 1
                 i = j
             else:
@@ -4567,6 +4633,7 @@ class MainWindow(Gtk.Window):
         rows = [
             (Glyph.Lines, "Текст песен", "lyrics"),
             (Glyph.Sparkle, "Эффекты текста", "lyric_effects"),
+            (Glyph.Pulse, "Комбо повторов", "combo_panel"),
             (Glyph.Rim, "Ободок острова", "rim"),
             (Glyph.Mid, "Громкость приложения", "app_volume"),
             (Glyph.Wifi, "Уведомления о сети", "network"),
@@ -4580,7 +4647,11 @@ class MainWindow(Gtk.Window):
             ry = py + row_y_start + idx * row_h
             render_icon(cr, glyph, px + 22.0, ry + (row_h - 17.0) / 2.0, 17.0, COLOR_DIM[:3], alpha=alpha)
             draw_text(cr, label, px + 49.0, ry + row_h / 2.0, font_size=13.0, bold=False, color=COLOR_WHITE, alpha=alpha, align="left", valign="center")
-            self._toggles[key].render(cr, px + pw - 58.0, ry + (row_h - 24.0) / 2.0, w=46.0, h=24.0)
+            if key == "combo_panel":
+                status_lbl = "Вкл >" if Settings.combo_enabled else "Выкл >"
+                draw_text(cr, status_lbl, px + pw - 24.0, ry + row_h / 2.0, font_size=13.0, bold=False, color=COLOR_DIM[:3], alpha=alpha, align="right", valign="center")
+            else:
+                self._toggles[key].render(cr, px + pw - 58.0, ry + (row_h - 24.0) / 2.0, w=46.0, h=24.0)
 
         # Row 9: Clear cache
         cache_ry = py + row_y_start + len(rows) * row_h
@@ -4788,16 +4859,46 @@ class MainWindow(Gtk.Window):
 
         prev_x = box_x + 36.0
         prev_w = box_w - 48.0
+        anim_style = Settings.lyric_anim_style
+        fly_h = min(float(Settings.lyric_anim_height), 11.0)
+        stagger_val = float(Settings.lyric_anim_stagger) / 100.0
 
-        now = time.monotonic()
-        repeats = Settings.combo_min_repeats
-        step_idx = (int(now * 1.4) % (repeats + 1)) + 1
-        if Settings.combo_enabled:
-            badge_text = format_combo_badge("Едем дальше", step_idx, Settings.combo_counter_style)
-        else:
-            badge_text = "Едем дальше (без комбо)"
+        prev_exit_a = self._preview_prev_alpha.value
+        if prev_exit_a > 0.01 and self._preview_prev_text:
+            LyricLine.render_compact(
+                cr,
+                self._preview_prev_text,
+                prev_x,
+                box_y + 8.0,
+                prev_w,
+                COLOR_WHITE,
+                font_size=12.5,
+                h=34.0,
+                alpha=alpha,
+                exit_progress=1.0 - prev_exit_a,
+                anim_style=anim_style,
+                fly_height=fly_h,
+                stagger=stagger_val,
+            )
 
-        draw_text(cr, badge_text, prev_x + prev_w / 2.0, box_y + box_h / 2.0, font_size=13.0, bold=True, color=COLOR_WHITE, alpha=alpha, align="center", valign="center")
+        max_reps = max(2, Settings.combo_min_repeats + 1)
+        cur_text = self._preview_text or (format_combo_badge("Едем дальше", 1, Settings.combo_counter_style, max_reps) if Settings.combo_enabled else "Едем дальше")
+        enter_val = self._preview_enter.value
+        LyricLine.render_compact(
+            cr,
+            cur_text,
+            prev_x,
+            box_y + 8.0,
+            prev_w,
+            COLOR_WHITE,
+            font_size=12.5,
+            h=34.0,
+            alpha=alpha,
+            enter_progress=enter_val,
+            anim_style=anim_style,
+            fly_height=fly_h,
+            stagger=stagger_val,
+        )
 
         self._row_list_combo.render_highlight(cr, w=pw - 20.0, x=px + 10.0)
 
@@ -4813,17 +4914,28 @@ class MainWindow(Gtk.Window):
             COMBO_STYLE_EN_X: "x1, x2...",
             COMBO_STYLE_TIMES: "×1, ×2...",
             COMBO_STYLE_BRACKETS: "(1), (2)...",
+            COMBO_STYLE_SQUARE: "[1], [2]...",
             COMBO_STYLE_HASH: "#1, #2...",
+            COMBO_STYLE_PROGRESS: "1/4, 2/4...",
         }
         cur_style_lbl = style_labels.get(Settings.combo_counter_style, "х1, х2...")
+
+        min_len_labels = {
+            1: "Любая длина",
+            2: "От 2 букв",
+            3: "От 3 букв",
+            4: "От 4 букв",
+        }
+        cur_len_lbl = min_len_labels.get(Settings.combo_min_word_len, "От 2 букв")
 
         rows = [
             (Glyph.Pulse, "Включить комбо", "toggle", "combo_enabled"),
             (Glyph.Lines, "Порог повторов", "cycle", f"От {Settings.combo_min_repeats} раз"),
-            (Glyph.Lines, "Режим разбивки", "cycle", cur_split_lbl),
             (Glyph.Sparkle, "Стиль счётчика", "cycle", cur_style_lbl),
+            (Glyph.Lines, "Режим разбивки", "cycle", cur_split_lbl),
             (Glyph.Music, "Игнорировать эдлибы", "toggle", "combo_ignore_adlibs"),
             (Glyph.Look, "Очищать скобки", "toggle", "combo_strip_brackets"),
+            (Glyph.Expand, "Минимум букв", "cycle", cur_len_lbl),
         ]
 
         row_y_start = 104.0
