@@ -51,6 +51,29 @@ ANIM_STYLE_BOUNCE = "bounce"
 ANIM_STYLE_SLIDE = "slide"
 ANIM_STYLES = (ANIM_STYLE_LETTERS, ANIM_STYLE_WAVE, ANIM_STYLE_BOUNCE, ANIM_STYLE_SLIDE)
 
+COMBO_STYLE_RU_X = "ru_x"        # х1
+COMBO_STYLE_EN_X = "en_x"        # x1
+COMBO_STYLE_TIMES = "times"      # ×1
+COMBO_STYLE_BRACKETS = "brackets"# (1)
+COMBO_STYLE_HASH = "hash"        # #1
+COMBO_STYLES = (COMBO_STYLE_RU_X, COMBO_STYLE_EN_X, COMBO_STYLE_TIMES, COMBO_STYLE_BRACKETS, COMBO_STYLE_HASH)
+
+COMBO_SPLIT_PUNCT = "punct"      # По знакам
+COMBO_SPLIT_WORDS = "words"      # По словам
+COMBO_SPLIT_LINES = "lines"      # Только строки
+COMBO_SPLITS = (COMBO_SPLIT_PUNCT, COMBO_SPLIT_WORDS, COMBO_SPLIT_LINES)
+
+def format_combo_badge(phrase: str, count: int, style: str = COMBO_STYLE_RU_X) -> str:
+    if style == COMBO_STYLE_EN_X:
+        return f"{phrase} x{count}"
+    elif style == COMBO_STYLE_TIMES:
+        return f"{phrase} ×{count}"
+    elif style == COMBO_STYLE_BRACKETS:
+        return f"{phrase} ({count})"
+    elif style == COMBO_STYLE_HASH:
+        return f"{phrase} #{count}"
+    return f"{phrase} х{count}"
+
 class _SettingsMeta(type):
 
     @property
@@ -128,6 +151,62 @@ class _SettingsMeta(type):
     @lyric_lead_ahead.setter
     def lyric_lead_ahead(cls, value: bool) -> None:
         cls._set("lyric_lead_ahead", bool(value))
+
+    @property
+    def combo_enabled(cls) -> bool:
+        return cls._get_bool("combo_enabled", True)
+
+    @combo_enabled.setter
+    def combo_enabled(cls, value: bool) -> None:
+        cls._set("combo_enabled", bool(value))
+
+    @property
+    def combo_min_repeats(cls) -> int:
+        return max(2, min(5, cls._get_int("combo_min_repeats", 3)))
+
+    @combo_min_repeats.setter
+    def combo_min_repeats(cls, value: int) -> None:
+        cls._set("combo_min_repeats", max(2, min(5, int(value))))
+
+    @property
+    def combo_ignore_adlibs(cls) -> bool:
+        return cls._get_bool("combo_ignore_adlibs", True)
+
+    @combo_ignore_adlibs.setter
+    def combo_ignore_adlibs(cls, value: bool) -> None:
+        cls._set("combo_ignore_adlibs", bool(value))
+
+    @property
+    def combo_split_mode(cls) -> str:
+        val = str(cls._data.get("combo_split_mode", COMBO_SPLIT_PUNCT)).lower()
+        return val if val in COMBO_SPLITS else COMBO_SPLIT_PUNCT
+
+    @combo_split_mode.setter
+    def combo_split_mode(cls, value: str) -> None:
+        val = str(value).lower()
+        if val not in COMBO_SPLITS:
+            val = COMBO_SPLIT_PUNCT
+        cls._set("combo_split_mode", val)
+
+    @property
+    def combo_counter_style(cls) -> str:
+        val = str(cls._data.get("combo_counter_style", COMBO_STYLE_RU_X)).lower()
+        return val if val in COMBO_STYLES else COMBO_STYLE_RU_X
+
+    @combo_counter_style.setter
+    def combo_counter_style(cls, value: str) -> None:
+        val = str(value).lower()
+        if val not in COMBO_STYLES:
+            val = COMBO_STYLE_RU_X
+        cls._set("combo_counter_style", val)
+
+    @property
+    def combo_strip_brackets(cls) -> bool:
+        return cls._get_bool("combo_strip_brackets", True)
+
+    @combo_strip_brackets.setter
+    def combo_strip_brackets(cls, value: bool) -> None:
+        cls._set("combo_strip_brackets", bool(value))
 
     @property
     def LyricEffects(cls) -> bool:

@@ -64,6 +64,17 @@ from settings import (
     MATERIAL_LIQUID,
     MATERIAL_MATTE,
     MATERIAL_NONE,
+    COMBO_STYLE_RU_X,
+    COMBO_STYLE_EN_X,
+    COMBO_STYLE_TIMES,
+    COMBO_STYLE_BRACKETS,
+    COMBO_STYLE_HASH,
+    COMBO_STYLES,
+    COMBO_SPLIT_PUNCT,
+    COMBO_SPLIT_WORDS,
+    COMBO_SPLIT_LINES,
+    COMBO_SPLITS,
+    format_combo_badge,
     Settings,
 )
 from shelf import Shelf, ShelfItem
@@ -98,6 +109,7 @@ class View(Enum):
     SETTINGS = auto()
     LOOK = auto()
     TEXT_ANIM = auto()
+    COMBO = auto()
     SHELF = auto()
     UPDATE = auto()
 
@@ -110,6 +122,7 @@ class Panel(Enum):
     SETTINGS = auto()
     LOOK = auto()
     TEXT_ANIM = auto()
+    COMBO = auto()
     SHELF = auto()
     UPDATE = auto()
 
@@ -152,6 +165,7 @@ SIZES: dict[View, Dims] = {
     View.SETTINGS: Dims(320, SETTINGS_HEIGHT, 34),
     View.LOOK: Dims(LOOK_WIDTH, LOOK_HEIGHT, 34),
     View.TEXT_ANIM: Dims(320, 390, 34),
+    View.COMBO: Dims(320, 420, 34),
     View.SHELF: Dims(380, 136, 34),
     View.UPDATE: Dims(340, 230, 34),
 }
@@ -471,6 +485,7 @@ class MainWindow(Gtk.Window):
         self._row_list_settings = RowList()
         self._row_list_look = RowList()
         self._row_list_text_anim = RowList()
+        self._row_list_combo = RowList()
         self._update_scroll = Spring(0.0, 240.0, 28.0)
         self._notch = Spring(1.0 if Settings.notch else 0.0, 240.0, 22.0)
         self._cache_feedback_until: float = 0.0
@@ -498,6 +513,9 @@ class MainWindow(Gtk.Window):
             "click_lock": Toggle(Settings.click_lock),
             "autostart": Toggle(Settings.autostart),
             "capitalize_title": Toggle(Settings.capitalize_title),
+            "combo_enabled": Toggle(Settings.combo_enabled),
+            "combo_ignore_adlibs": Toggle(Settings.combo_ignore_adlibs),
+            "combo_strip_brackets": Toggle(Settings.combo_strip_brackets),
         }
 
         self._w = Spring(34.0)
@@ -1211,7 +1229,7 @@ class MainWindow(Gtk.Window):
             row_y_start = 108.0
             row_h = 42.0
             hovered = None
-            for idx in range(5):
+            for idx in range(6):
                 ry = py + row_y_start + idx * row_h
                 if px + 10 <= lx <= px + pw - 10 and ry <= ly < ry + row_h:
                     hovered = idx
@@ -1219,6 +1237,20 @@ class MainWindow(Gtk.Window):
                     break
             if hovered is None:
                 self._row_list_text_anim.clear_hover()
+            self.area.queue_draw()
+
+        elif self._current_view == View.COMBO:
+            row_y_start = 104.0
+            row_h = 42.0
+            hovered = None
+            for idx in range(6):
+                ry = py + row_y_start + idx * row_h
+                if px + 10 <= lx <= px + pw - 10 and ry <= ly < ry + row_h:
+                    hovered = idx
+                    self._row_list_combo.move_to(ry, row_h, idx)
+                    break
+            if hovered is None:
+                self._row_list_combo.clear_hover()
             self.area.queue_draw()
 
         elif self._current_view == View.SHELF:
@@ -1302,6 +1334,10 @@ class MainWindow(Gtk.Window):
                 self._drag_start_y = y
                 self._drag_orig_pos_x = Settings.pos_x
                 self._drag_orig_pos_y = Settings.pos_y
+            elif self._current_view == View.TEXT_ANIM:
+                self._row_list_text_anim.set_pressed(True)
+            elif self._current_view == View.COMBO:
+                self._row_list_combo.set_pressed(True)
 
             self._pressed = True
             self.set_targets()
@@ -1318,6 +1354,8 @@ class MainWindow(Gtk.Window):
             self._row_list_menu.set_pressed(False)
             self._row_list_settings.set_pressed(False)
             self._row_list_look.set_pressed(False)
+            self._row_list_text_anim.set_pressed(False)
+            self._row_list_combo.set_pressed(False)
             self.set_targets()
             return
 
@@ -1645,7 +1683,7 @@ class MainWindow(Gtk.Window):
             row_y_start = 108.0
             row_h = 42.0
             if px <= lx <= px + pw:
-                for idx in range(5):
+                for idx in range(6):
                     ry = py + row_y_start + idx * row_h
                     if ry <= ly < ry + row_h:
                         if idx == 0:
@@ -1666,6 +1704,11 @@ class MainWindow(Gtk.Window):
                             Settings.lyric_anim_stagger = staggers[(cur + 1) % len(staggers)]
                         elif idx == 4:
                             Settings.lyric_lead_ahead = not Settings.lyric_lead_ahead
+                        elif idx == 5:
+                            self.open_panel(Panel.COMBO)
+                            self.update_view()
+                            self.set_targets()
+                            return
 
                         self._preview_prev_text = self._preview_text or preview_text
                         self._preview_text = preview_text
@@ -1673,6 +1716,46 @@ class MainWindow(Gtk.Window):
                         self._preview_prev_alpha.target = 0.0
                         self._preview_enter.value = 0.0
                         self._preview_enter.target = 1.0
+                        self.area.queue_draw()
+                        return
+
+        if self._current_view == View.COMBO:
+            if px <= lx <= px + 150 and py + 12 <= ly <= py + 40:
+                self.open_panel(Panel.TEXT_ANIM)
+                self.update_view()
+                self.set_targets()
+                return
+
+            row_y_start = 104.0
+            row_h = 42.0
+            if px <= lx <= px + pw:
+                for idx in range(6):
+                    ry = py + row_y_start + idx * row_h
+                    if ry <= ly < ry + row_h:
+                        if idx == 0:
+                            Settings.combo_enabled = not Settings.combo_enabled
+                            self._toggles["combo_enabled"].set_state(Settings.combo_enabled, animate=True)
+                        elif idx == 1:
+                            reps = [2, 3, 4]
+                            cur = reps.index(Settings.combo_min_repeats) if Settings.combo_min_repeats in reps else 1
+                            Settings.combo_min_repeats = reps[(cur + 1) % len(reps)]
+                        elif idx == 2:
+                            splits = [COMBO_SPLIT_PUNCT, COMBO_SPLIT_WORDS, COMBO_SPLIT_LINES]
+                            cur = splits.index(Settings.combo_split_mode) if Settings.combo_split_mode in splits else 0
+                            Settings.combo_split_mode = splits[(cur + 1) % len(splits)]
+                        elif idx == 3:
+                            styles = list(COMBO_STYLES)
+                            cur = styles.index(Settings.combo_counter_style) if Settings.combo_counter_style in styles else 0
+                            Settings.combo_counter_style = styles[(cur + 1) % len(styles)]
+                        elif idx == 4:
+                            Settings.combo_ignore_adlibs = not Settings.combo_ignore_adlibs
+                            self._toggles["combo_ignore_adlibs"].set_state(Settings.combo_ignore_adlibs, animate=True)
+                        elif idx == 5:
+                            Settings.combo_strip_brackets = not Settings.combo_strip_brackets
+                            self._toggles["combo_strip_brackets"].set_state(Settings.combo_strip_brackets, animate=True)
+
+                        self._compact_lines_cache = None
+                        play_sound("click")
                         self.area.queue_draw()
                         return
 
@@ -1936,6 +2019,8 @@ class MainWindow(Gtk.Window):
                 target = View.LOOK
             elif self._panel == Panel.TEXT_ANIM:
                 target = View.TEXT_ANIM
+            elif self._panel == Panel.COMBO:
+                target = View.COMBO
             elif self._panel == Panel.SHELF:
                 target = View.SHELF
             elif self._panel == Panel.UPDATE:
@@ -2024,6 +2109,11 @@ class MainWindow(Gtk.Window):
             max_screen_h = (self.win_height - 60.0) / scale_val if self.win_height > 200 else 500.0
             look_h = max(380.0, min(500.0, max_screen_h))
             return Dims(LOOK_WIDTH, look_h, 34)
+        if view == View.COMBO:
+            scale_val = max(0.01, self._size.value)
+            max_screen_h = (self.win_height - 60.0) / scale_val if self.win_height > 200 else 430.0
+            combo_h = max(340.0, min(430.0, max_screen_h))
+            return Dims(320.0, combo_h, 34)
         return d
 
     def set_targets(self) -> None:
@@ -2723,10 +2813,11 @@ class MainWindow(Gtk.Window):
     @classmethod
     def _clean_phrase(cls, p: str) -> str:
         s = p.strip().strip(cls.PUNCT_ONLY).strip()
-        if (s.startswith("(") and s.endswith(")")) or (s.startswith("[") and s.endswith("]")) or (s.startswith("{") and s.endswith("}")):
-            inner = s[1:-1].strip().strip(cls.PUNCT_ONLY).strip()
-            if inner:
-                s = inner
+        if Settings.combo_strip_brackets:
+            if (s.startswith("(") and s.endswith(")")) or (s.startswith("[") and s.endswith("]")) or (s.startswith("{") and s.endswith("}")):
+                inner = s[1:-1].strip().strip(cls.PUNCT_ONLY).strip()
+                if inner:
+                    s = inner
         return s
 
     @classmethod
@@ -2737,15 +2828,27 @@ class MainWindow(Gtk.Window):
 
     @classmethod
     def _split_phrase_line(cls, text: str) -> list[str]:
+        if not Settings.combo_enabled:
+            clean_full = cls._clean_phrase(text)
+            return [clean_full] if clean_full else []
+
+        split_mode = Settings.combo_split_mode
+        if split_mode == COMBO_SPLIT_LINES:
+            clean_full = cls._clean_phrase(text)
+            return [clean_full] if clean_full else []
+
         s = text.strip()
-        if (s.startswith("(") and s.endswith(")")) or (s.startswith("[") and s.endswith("]")) or (s.startswith("{") and s.endswith("}")):
-            s = s[1:-1].strip()
+        if Settings.combo_strip_brackets:
+            if (s.startswith("(") and s.endswith(")")) or (s.startswith("[") and s.endswith("]")) or (s.startswith("{") and s.endswith("}")):
+                s = s[1:-1].strip()
+
         parts = [cls._clean_phrase(p) for p in re.split(r'[,;!?]+\s*', s) if cls._clean_phrase(p)]
-        if len(parts) <= 1:
+        if split_mode == COMBO_SPLIT_WORDS and len(parts) <= 1:
             words = [cls._clean_phrase(w) for w in s.split() if cls._clean_phrase(w)]
             if len(words) > 1:
                 parts = words
 
+        min_rep = Settings.combo_min_repeats
         if len(parts) > 1:
             norm0 = cls._normalize_phrase(parts[0])
             if norm0 and all(cls._normalize_phrase(p) == norm0 for p in parts):
@@ -2756,7 +2859,7 @@ class MainWindow(Gtk.Window):
             for k in range(1, len(parts)):
                 if cls._normalize_phrase(parts[k]) == cls._normalize_phrase(parts[k - 1]):
                     run_len += 1
-                    if run_len >= 3:
+                    if run_len >= min_rep:
                         has_combo_run = True
                         break
                 else:
@@ -2772,6 +2875,13 @@ class MainWindow(Gtk.Window):
     def _process_compact_lines(cls, raw_lines: list[tuple[float, str]], duration: float) -> list[tuple[float, str]]:
         if not raw_lines:
             return []
+        if not Settings.combo_enabled:
+            return [(t, cls._clean_phrase(txt)) for t, txt in raw_lines if txt.strip()]
+
+        min_rep = Settings.combo_min_repeats
+        ignore_adlibs = Settings.combo_ignore_adlibs
+        c_style = Settings.combo_counter_style
+
         expanded: list[tuple[float, str, float, bool, str, int]] = []
         for idx, (t, txt) in enumerate(raw_lines):
             if not txt.strip() or is_wordless(txt):
@@ -2802,14 +2912,15 @@ class MainWindow(Gtk.Window):
                 if cur_norm == norm:
                     j += 1
                 elif (
-                    j + 1 < len(expanded)
+                    ignore_adlibs
+                    and j + 1 < len(expanded)
                     and cls._normalize_phrase(expanded[j + 1][1]) == norm
                     and (len(cls._clean_phrase(expanded[j][1])) <= 4 or (expanded[j][1].strip().startswith("(") and expanded[j][1].strip().endswith(")")))
                 ):
                     j += 1
                 else:
                     break
-            if j - i >= 3:
+            if j - i >= min_rep:
                 for k in range(i, j):
                     lines_with_combos.add(expanded[k][5])
                 i = j
@@ -2834,7 +2945,8 @@ class MainWindow(Gtk.Window):
                 if cur_norm == norm:
                     j += 1
                 elif (
-                    j + 1 < len(expanded)
+                    ignore_adlibs
+                    and j + 1 < len(expanded)
                     and cls._normalize_phrase(expanded[j + 1][1]) == norm
                     and (len(cls._clean_phrase(expanded[j][1])) <= 4 or (expanded[j][1].strip().startswith("(") and expanded[j][1].strip().endswith(")")))
                 ):
@@ -2843,12 +2955,12 @@ class MainWindow(Gtk.Window):
                     break
 
             count = j - i
-            if count >= 3:
+            if count >= min_rep:
                 combo_idx = 1
                 for k in range(i, j):
                     sub_t, sub_txt = expanded[k][0], expanded[k][1]
                     clean_sub = cls._clean_phrase(sub_txt)
-                    result.append((sub_t, f"{clean_sub} х{combo_idx}"))
+                    result.append((sub_t, format_combo_badge(clean_sub, combo_idx, c_style)))
                     combo_idx += 1
                 i = j
             else:
@@ -3495,6 +3607,8 @@ class MainWindow(Gtk.Window):
             self.render_look(cr, px, py, pw, ph, alpha)
         elif view == View.TEXT_ANIM:
             self.render_text_anim(cr, px, py, pw, ph, alpha)
+        elif view == View.COMBO:
+            self.render_combo(cr, px, py, pw, ph, alpha)
         elif view == View.SHELF:
             self.render_shelf(cr, px, py, pw, ph, alpha)
         elif view == View.UPDATE:
@@ -4641,6 +4755,7 @@ class MainWindow(Gtk.Window):
             (Glyph.Expand, "Высота вылета", f"{Settings.lyric_anim_height} px"),
             (Glyph.Pulse, "Задержка букв", f"{Settings.lyric_anim_stagger} мс"),
             (Glyph.Clock, "Пред-показ строк", "За 5 сек" if Settings.lyric_lead_ahead else "Выкл"),
+            (Glyph.Pulse, "Комбо повторов", "Настроить >"),
         ]
 
         row_y_start = 108.0
@@ -4650,6 +4765,77 @@ class MainWindow(Gtk.Window):
             render_icon(cr, glyph, px + 22.0, ry + (row_h - 17.0) / 2.0, 17.0, COLOR_DIM[:3], alpha=alpha)
             draw_text(cr, label, px + 49.0, ry + row_h / 2.0, font_size=13.0, bold=False, color=COLOR_WHITE, alpha=alpha, align="left", valign="center")
             draw_text(cr, val_text, px + pw - 24.0, ry + row_h / 2.0, font_size=13.0, bold=False, color=COLOR_DIM[:3], alpha=alpha, align="right", valign="center")
+
+    def render_combo(self, cr: cairo.Context, px: float, py: float, pw: float, ph: float, alpha: float) -> None:
+        render_icon(cr, Glyph.Back, px + 20.0, py + 18.0, 10.0, COLOR_DIM[:3], alpha=0.6 * alpha)
+        draw_text(cr, "КОМБО ПОВТОРОВ", px + 36.0, py + 23.0, font_size=10.5, bold=True, color=COLOR_DIM[:3], alpha=0.6 * alpha, align="left", valign="center")
+
+        box_x = px + 18.0
+        box_y = py + 42.0
+        box_w = pw - 36.0
+        box_h = 50.0
+
+        draw_rounded_rect(cr, box_x, box_y, box_w, box_h, 16.0)
+        cr.set_source_rgba(0.06, 0.06, 0.08, 0.85 * alpha)
+        cr.fill()
+
+        draw_rounded_rect(cr, box_x, box_y, box_w, box_h, 16.0)
+        cr.set_source_rgba(1.0, 1.0, 1.0, 0.12 * alpha)
+        cr.set_line_width(1.0)
+        cr.stroke()
+
+        render_icon(cr, Glyph.Pulse, box_x + 13.0, box_y + 17.0, 16.0, self._accent_color, alpha=alpha)
+
+        prev_x = box_x + 36.0
+        prev_w = box_w - 48.0
+
+        now = time.monotonic()
+        repeats = Settings.combo_min_repeats
+        step_idx = (int(now * 1.4) % (repeats + 1)) + 1
+        if Settings.combo_enabled:
+            badge_text = format_combo_badge("Едем дальше", step_idx, Settings.combo_counter_style)
+        else:
+            badge_text = "Едем дальше (без комбо)"
+
+        draw_text(cr, badge_text, prev_x + prev_w / 2.0, box_y + box_h / 2.0, font_size=13.0, bold=True, color=COLOR_WHITE, alpha=alpha, align="center", valign="center")
+
+        self._row_list_combo.render_highlight(cr, w=pw - 20.0, x=px + 10.0)
+
+        split_labels = {
+            COMBO_SPLIT_PUNCT: "По знакам",
+            COMBO_SPLIT_WORDS: "По словам",
+            COMBO_SPLIT_LINES: "Только строки",
+        }
+        cur_split_lbl = split_labels.get(Settings.combo_split_mode, "По знакам")
+
+        style_labels = {
+            COMBO_STYLE_RU_X: "х1, х2...",
+            COMBO_STYLE_EN_X: "x1, x2...",
+            COMBO_STYLE_TIMES: "×1, ×2...",
+            COMBO_STYLE_BRACKETS: "(1), (2)...",
+            COMBO_STYLE_HASH: "#1, #2...",
+        }
+        cur_style_lbl = style_labels.get(Settings.combo_counter_style, "х1, х2...")
+
+        rows = [
+            (Glyph.Pulse, "Включить комбо", "toggle", "combo_enabled"),
+            (Glyph.Lines, "Порог повторов", "cycle", f"От {Settings.combo_min_repeats} раз"),
+            (Glyph.Lines, "Режим разбивки", "cycle", cur_split_lbl),
+            (Glyph.Sparkle, "Стиль счётчика", "cycle", cur_style_lbl),
+            (Glyph.Music, "Игнорировать эдлибы", "toggle", "combo_ignore_adlibs"),
+            (Glyph.Look, "Очищать скобки", "toggle", "combo_strip_brackets"),
+        ]
+
+        row_y_start = 104.0
+        row_h = 42.0
+        for idx, (glyph, label, kind, val) in enumerate(rows):
+            ry = py + row_y_start + idx * row_h
+            render_icon(cr, glyph, px + 22.0, ry + (row_h - 17.0) / 2.0, 17.0, COLOR_DIM[:3], alpha=alpha)
+            draw_text(cr, label, px + 49.0, ry + row_h / 2.0, font_size=13.0, bold=False, color=COLOR_WHITE, alpha=alpha, align="left", valign="center")
+            if kind == "toggle":
+                self._toggles[val].render(cr, px + pw - 58.0, ry + (row_h - 24.0) / 2.0, w=46.0, h=24.0)
+            else:
+                draw_text(cr, val, px + pw - 24.0, ry + row_h / 2.0, font_size=13.0, bold=False, color=COLOR_DIM[:3], alpha=alpha, align="right", valign="center")
 
     def render_update(self, cr: cairo.Context, px: float, py: float, pw: float, ph: float, alpha: float) -> None:
         render_icon(cr, Glyph.Back, px + 20.0, py + 18.0, 10.0, COLOR_DIM[:3], alpha=0.6 * alpha)

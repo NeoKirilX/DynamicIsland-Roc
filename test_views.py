@@ -108,6 +108,12 @@ def test_views():
         assert win._current_view == View.TEXT_ANIM
         print("  Panel.TEXT_ANIM opened successfully ->", win._current_view)
 
+        win.open_panel(Panel.COMBO)
+        win.update_view()
+        assert win._panel == Panel.COMBO
+        assert win._current_view == View.COMBO
+        print("  Panel.COMBO opened successfully ->", win._current_view)
+
         win.open_panel(Panel.SHELF)
         win.update_view()
         assert win._panel == Panel.SHELF

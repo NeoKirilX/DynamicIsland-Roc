@@ -4,7 +4,8 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DIST_DIR="$SCRIPT_DIR/dist"
 BUILD_DIR="$SCRIPT_DIR/build"
-ARCHIVE_NAME="dynamic-island-v1.0.0-linux-x86_64.tar.gz"
+VERSION="${1:-$(grep 'CURRENT_VERSION = ' "$SCRIPT_DIR/updater.py" | cut -d '"' -f 2)}"
+ARCHIVE_NAME="dynamic-island-v${VERSION}-linux-x86_64.tar.gz"
 
 echo "=== Building Standalone Dynamic Island Linux Release ==="
 
