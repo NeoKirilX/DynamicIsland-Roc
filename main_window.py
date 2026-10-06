@@ -72,6 +72,7 @@ from settings import (
     COMBO_STYLE_HASH,
     COMBO_STYLE_PROGRESS,
     COMBO_STYLES,
+    COMBO_SPLIT_ALL,
     COMBO_SPLIT_PUNCT,
     COMBO_SPLIT_WORDS,
     COMBO_SPLIT_LINES,
@@ -1820,7 +1821,7 @@ class MainWindow(Gtk.Window):
                             cur = styles.index(Settings.combo_counter_style) if Settings.combo_counter_style in styles else 0
                             Settings.combo_counter_style = styles[(cur + 1) % len(styles)]
                         elif idx == 3:
-                            splits = [COMBO_SPLIT_PUNCT, COMBO_SPLIT_WORDS, COMBO_SPLIT_LINES]
+                            splits = list(COMBO_SPLITS)
                             cur = splits.index(Settings.combo_split_mode) if Settings.combo_split_mode in splits else 0
                             Settings.combo_split_mode = splits[(cur + 1) % len(splits)]
                         elif idx == 4:
@@ -2984,6 +2985,63 @@ class MainWindow(Gtk.Window):
         return re.sub(r'[\s.,!?;:\"\'—–\-\(\)\[\]\{\}«»]+', '', target.lower())
 
     @classmethod
+    def _max_combo_run(cls, parts: list[str], min_len: int = 1) -> int:
+        if not parts:
+            return 0
+        norm0 = cls._normalize_phrase(parts[0])
+        if norm0 and len(norm0) >= min_len and all(cls._normalize_phrase(p) == norm0 for p in parts):
+            return len(parts)
+        max_run = 1
+        run_len = 1
+        for k in range(1, len(parts)):
+            cur_norm = cls._normalize_phrase(parts[k])
+            prev_norm = cls._normalize_phrase(parts[k - 1])
+            if cur_norm == prev_norm and len(cur_norm) >= min_len:
+                run_len += 1
+                if run_len > max_run:
+                    max_run = run_len
+            else:
+                run_len = 1
+        return max_run
+
+    @classmethod
+    def _find_ngram_combo(cls, words: list[str], min_rep: int, min_len: int = 1, max_n: int = 3) -> tuple[Optional[list[str]], int]:
+        n_words = len(words)
+        best_parts: Optional[list[str]] = None
+        best_reps = 0
+        for n in range(max_n, 1, -1):
+            if n_words < n * min_rep:
+                continue
+            for start in range(n_words - n * min_rep + 1):
+                chunk0 = " ".join(words[start : start + n])
+                chunk_words = words[start : start + n]
+                if len(chunk_words) > 1 and all(cls._normalize_phrase(w) == cls._normalize_phrase(chunk_words[0]) for w in chunk_words):
+                    continue
+                norm0 = cls._normalize_phrase(chunk0)
+                if not norm0 or len(norm0) < min_len:
+                    continue
+                repeats = 1
+                idx = start + n
+                while idx + n <= n_words:
+                    chunk = " ".join(words[idx : idx + n])
+                    if cls._normalize_phrase(chunk) == norm0:
+                        repeats += 1
+                        idx += n
+                    else:
+                        break
+                if repeats >= min_rep and repeats > best_reps:
+                    best_reps = repeats
+                    parts: list[str] = []
+                    if start > 0:
+                        parts.append(" ".join(words[:start]))
+                    for r in range(repeats):
+                        parts.append(" ".join(words[start + r * n : start + (r + 1) * n]))
+                    if idx < n_words:
+                        parts.append(" ".join(words[idx:]))
+                    best_parts = parts
+        return best_parts, best_reps
+
+    @classmethod
     def _split_phrase_line(cls, text: str) -> list[str]:
         if not Settings.combo_enabled:
             clean_full = cls._clean_phrase(text)
@@ -2999,32 +3057,38 @@ class MainWindow(Gtk.Window):
             if (s.startswith("(") and s.endswith(")")) or (s.startswith("[") and s.endswith("]")) or (s.startswith("{") and s.endswith("}")):
                 s = s[1:-1].strip()
 
-        parts = [cls._clean_phrase(p) for p in re.split(r'[,;!?]+\s*', s) if cls._clean_phrase(p)]
-        if split_mode == COMBO_SPLIT_WORDS and len(parts) <= 1:
-            words = [cls._clean_phrase(w) for w in s.split() if cls._clean_phrase(w)]
-            if len(words) > 1:
-                parts = words
-
         min_rep = Settings.combo_min_repeats
-        if len(parts) > 1:
-            norm0 = cls._normalize_phrase(parts[0])
-            if norm0 and all(cls._normalize_phrase(p) == norm0 for p in parts):
-                return parts
+        min_len = Settings.combo_min_word_len
 
-            has_combo_run = False
-            run_len = 1
-            for k in range(1, len(parts)):
-                if cls._normalize_phrase(parts[k]) == cls._normalize_phrase(parts[k - 1]):
-                    run_len += 1
-                    if run_len >= min_rep:
-                        has_combo_run = True
-                        break
-                else:
-                    run_len = 1
+        # 1. Punctuation breakdown
+        punct_parts = [cls._clean_phrase(p) for p in re.split(r'[,;!?]+\s*', s) if cls._clean_phrase(p)]
+        punct_run = cls._max_combo_run(punct_parts, min_len)
 
-            if has_combo_run:
-                return parts
+        if split_mode == COMBO_SPLIT_PUNCT:
+            if punct_run >= min_rep:
+                return punct_parts
+            clean_full = cls._clean_phrase(text)
+            return [clean_full] if clean_full else []
 
+        # If punctuation already forms a combo run >= min_rep, use it (preserves phrases with commas)
+        if punct_run >= min_rep:
+            return punct_parts
+
+        # 2. Words and n-grams breakdown (active in ALL and WORDS modes)
+        words = [cls._clean_phrase(w) for w in re.split(r'[\s.,!?;:\"\'—–\-\(\)\[\]«»]+', s) if cls._clean_phrase(w)]
+        if len(words) >= min_rep:
+            ngram_parts, ngram_reps = cls._find_ngram_combo(words, min_rep, min_len)
+            word_run = cls._max_combo_run(words, min_len)
+
+            if word_run >= min_rep and word_run >= ngram_reps:
+                return words
+            elif ngram_parts is not None and ngram_reps >= min_rep:
+                return ngram_parts
+            elif word_run >= min_rep:
+                return words
+
+        # In ALL mode, if neither punctuation nor word breakdown formed a sub-line combo,
+        # return the intact line so adjacent repeated lines can trigger line-level combos!
         clean_full = cls._clean_phrase(text)
         return [clean_full] if clean_full else []
 
@@ -5110,11 +5174,12 @@ class MainWindow(Gtk.Window):
         self._row_list_combo.render_highlight(cr, w=pw - 20.0, x=px + 10.0)
 
         split_labels = {
+            COMBO_SPLIT_ALL: "Все варианты",
             COMBO_SPLIT_PUNCT: "По знакам",
             COMBO_SPLIT_WORDS: "По словам",
             COMBO_SPLIT_LINES: "Только строки",
         }
-        cur_split_lbl = split_labels.get(Settings.combo_split_mode, "По знакам")
+        cur_split_lbl = split_labels.get(Settings.combo_split_mode, "Все варианты")
 
         style_labels = {
             COMBO_STYLE_RU_X: "х1, х2...",

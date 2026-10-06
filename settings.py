@@ -68,10 +68,11 @@ COMBO_STYLES = (
     COMBO_STYLE_PROGRESS,
 )
 
+COMBO_SPLIT_ALL = "all"          # Все варианты (комбинированный)
 COMBO_SPLIT_PUNCT = "punct"      # По знакам
 COMBO_SPLIT_WORDS = "words"      # По словам
 COMBO_SPLIT_LINES = "lines"      # Только строки
-COMBO_SPLITS = (COMBO_SPLIT_PUNCT, COMBO_SPLIT_WORDS, COMBO_SPLIT_LINES)
+COMBO_SPLITS = (COMBO_SPLIT_ALL, COMBO_SPLIT_PUNCT, COMBO_SPLIT_WORDS, COMBO_SPLIT_LINES)
 
 def format_combo_badge(phrase: str, count: int, style: str = COMBO_STYLE_RU_X, total: int = 0) -> str:
     if style == COMBO_STYLE_EN_X:
@@ -194,14 +195,14 @@ class _SettingsMeta(type):
 
     @property
     def combo_split_mode(cls) -> str:
-        val = str(cls._data.get("combo_split_mode", COMBO_SPLIT_PUNCT)).lower()
-        return val if val in COMBO_SPLITS else COMBO_SPLIT_PUNCT
+        val = str(cls._data.get("combo_split_mode", COMBO_SPLIT_ALL)).lower()
+        return val if val in COMBO_SPLITS else COMBO_SPLIT_ALL
 
     @combo_split_mode.setter
     def combo_split_mode(cls, value: str) -> None:
         val = str(value).lower()
         if val not in COMBO_SPLITS:
-            val = COMBO_SPLIT_PUNCT
+            val = COMBO_SPLIT_ALL
         cls._set("combo_split_mode", val)
 
     @property

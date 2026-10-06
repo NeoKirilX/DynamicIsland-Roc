@@ -17,7 +17,7 @@ import cairo
 
 from main_window import MainWindow, Panel, View, PLAYER_LYRIC_ROOM, PLAYER_HEIGHT
 from lyric import LyricLine, measure_text
-from settings import Settings
+from settings import Settings, COMBO_SPLIT_ALL
 
 FAILURES: list[str] = []
 
@@ -191,6 +191,8 @@ def on_activate(application) -> None:
     toast_win.destroy()
 
     print("\n[compact island] duplicate consecutive lines animate on change")
+    old_combo = Settings.combo_enabled
+    Settings.combo_enabled = False
     dup_win = MainWindow(application, forced_timer=45.0)
     dup_lines = [(10.0, "Repeated refrain"), (15.0, "Repeated refrain"), (20.0, "Final line")]
     dup_win._media._current_player = "test"
@@ -218,6 +220,7 @@ def on_activate(application) -> None:
     check(dup_win._lyric_prev_text == "Repeated refrain", "line 1 set as exit text")
     check(dup_win._lyric_prev_alpha.value > 0.2, "line 1 exit alpha triggered")
     dup_win.destroy()
+    Settings.combo_enabled = old_combo
 
     print("\n[compact island] lookahead to active does not retrigger slide-in")
     arm_win = MainWindow(application, forced_timer=45.0)
@@ -317,6 +320,40 @@ def on_activate(application) -> None:
     check(single_res[2][1] == "быстро х3", f"part 2 is x3: {single_res[2][1]!r}")
     check(single_res[3][1] == "быстро х4", f"part 3 is x4: {single_res[3][1]!r}")
     check(single_res[4][1] == "ай", f"part 4 is trailing word: {single_res[4][1]!r}")
+
+    print("\n[compact island] COMBO_SPLIT_ALL works across all breakdown strategies simultaneously")
+    Settings.combo_split_mode = COMBO_SPLIT_ALL
+    Settings.combo_min_repeats = 2
+
+    # 1. Word repeats without punctuation
+    word_line = [(0.0, "ла ла ла ла")]
+    word_res = MainWindow._process_compact_lines(word_line, 4.0)
+    check(len(word_res) == 4, f"words split into 4 items (got {len(word_res)})")
+    check(word_res[0][1] == "ла х1", f"word 0: {word_res[0][1]!r}")
+    check(word_res[3][1] == "ла х4", f"word 3: {word_res[3][1]!r}")
+
+    # 2. Multi-word phrase n-gram repeats without commas
+    ngram_line = [(0.0, "тра та та тра та та тра та та")]
+    ngram_res = MainWindow._process_compact_lines(ngram_line, 6.0)
+    check(len(ngram_res) == 3, f"ngrams split into 3 phrases (got {len(ngram_res)})")
+    check(ngram_res[0][1] == "тра та та х1", f"ngram 0: {ngram_res[0][1]!r}")
+    check(ngram_res[2][1] == "тра та та х3", f"ngram 2: {ngram_res[2][1]!r}")
+
+    # 3. Mixed punctuation and repeating words
+    mixed_line = [(0.0, "Эй, пам пам пам пам!")]
+    mixed_res = MainWindow._process_compact_lines(mixed_line, 5.0)
+    check(len(mixed_res) == 5, f"mixed split into 5 items (got {len(mixed_res)})")
+    check(mixed_res[0][1] == "Эй", f"mixed lead word preserved: {mixed_res[0][1]!r}")
+    check(mixed_res[1][1] == "пам х1", f"mixed combo 1: {mixed_res[1][1]!r}")
+    check(mixed_res[4][1] == "пам х4", f"mixed combo 4: {mixed_res[4][1]!r}")
+
+    # 4. Whole lines repeating across lines (line-level breakdown)
+    line_level = [(0.0, "Только ты"), (4.0, "Только ты"), (8.0, "Только ты")]
+    lines_res = MainWindow._process_compact_lines(line_level, 12.0)
+    check(len(lines_res) == 3, f"line-level kept as 3 combo lines (got {len(lines_res)})")
+    check(lines_res[0][1] == "Только ты х1", f"line 0: {lines_res[0][1]!r}")
+    check(lines_res[1][1] == "Только ты х2", f"line 1: {lines_res[1][1]!r}")
+    check(lines_res[2][1] == "Только ты х3", f"line 2: {lines_res[2][1]!r}")
 
     print()
     if FAILURES:
