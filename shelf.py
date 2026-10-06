@@ -45,6 +45,7 @@ class ShelfItem:
         p = Path(self.path)
         self.name: str = p.name if p.name else self.path
         self.photo: bool = False
+        self.is_config: bool = self.path.lower().endswith(".dni")
         self.surface: Optional[cairo.ImageSurface] = None
         self._data: Optional[bytearray] = None
         self.swell: Spring = Spring(1.0, 260.0, 24.0)
@@ -122,6 +123,40 @@ class Shelf:
         image_exts = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif", ".svg"}
         changed = False
         for item in items:
+            if item.is_config:
+                try:
+                    surf = cairo.ImageSurface(cairo.FORMAT_ARGB32, 112, 112)
+                    cr = cairo.Context(surf)
+                    # Rounded dark background
+                    _draw_rounded_rect(cr, 4.0, 4.0, 104.0, 104.0, 24.0)
+                    cr.set_source_rgba(0.12, 0.12, 0.15, 0.95)
+                    cr.fill_preserve()
+                    cr.set_source_rgba(1.0, 0.55, 0.0, 0.45)
+                    cr.set_line_width(2.0)
+                    cr.stroke()
+
+                    # Pill graphic
+                    _draw_rounded_rect(cr, 24.0, 28.0, 64.0, 28.0, 14.0)
+                    cr.set_source_rgba(0.0, 0.0, 0.0, 0.9)
+                    cr.fill_preserve()
+                    cr.set_source_rgba(1.0, 0.55, 0.0, 0.8)
+                    cr.set_line_width(1.5)
+                    cr.stroke()
+                    render_icon(cr, Glyph.Gear, 48.0, 34.0, 16.0, (1.0, 1.0, 1.0), 1.0)
+
+                    # Text label
+                    cr.select_font_face("Sans", cairo.FONT_SLANT_NORMAL, cairo.FONT_WEIGHT_BOLD)
+                    cr.set_font_size(15.0)
+                    cr.set_source_rgba(1.0, 1.0, 1.0, 0.95)
+                    cr.move_to(38.0, 84.0)
+                    cr.show_text(".DNI")
+                    item.surface = surf
+                    item.photo = True
+                    changed = True
+                except Exception:
+                    pass
+                continue
+
             p = Path(item.path)
             if p.suffix.lower() in image_exts and Image is not None:
                 try:

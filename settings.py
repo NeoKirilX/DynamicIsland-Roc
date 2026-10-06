@@ -410,6 +410,18 @@ class _SettingsMeta(type):
         cls.system_stats = value
 
     @property
+    def language(cls) -> str:
+        val = str(cls._data.get("language", "ru")).lower()
+        return val if val in ("ru", "en", "es", "de", "fr", "it", "pt", "zh", "ja", "uk") else "ru"
+
+    @language.setter
+    def language(cls, value: str) -> None:
+        val = str(value).lower()
+        if val not in ("ru", "en", "es", "de", "fr", "it", "pt", "zh", "ja", "uk"):
+            val = "ru"
+        cls._set("language", val)
+
+    @property
     def line_bar(cls) -> bool:
         return cls._get_bool("line_bar", False)
 

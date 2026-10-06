@@ -78,7 +78,18 @@ class Updater:
 
     def _check_worker(self) -> None:
         try:
-            resp = requests.get(API_URL, headers={"User-Agent": "DynamicIsland/1.0"}, timeout=12.0)
+            headers = {"User-Agent": "DynamicIsland/1.0"}
+            token = os.environ.get("GITHUB_TOKEN")
+            if not token:
+                try:
+                    import subprocess
+                    token = subprocess.check_output(["gh", "auth", "token"], text=True, stderr=subprocess.DEVNULL).strip()
+                except Exception:
+                    pass
+            if token:
+                headers["Authorization"] = f"token {token}"
+
+            resp = requests.get(API_URL, headers=headers, timeout=12.0)
             if resp.status_code == 200:
                 data = resp.json()
                 tag = data.get("tag_name", "").lstrip("v")
@@ -107,6 +118,22 @@ class Updater:
                     if self._is_newer(self.latest_version, self.current_version):
                         self.state = UpdateState.AVAILABLE
                     else:
+                        self.state = UpdateState.LATEST
+            elif resp.status_code == 403:
+                redir = requests.get(f"https://github.com/{REPO_OWNER}/{REPO_NAME}/releases/latest", allow_redirects=False, timeout=8.0)
+                loc = redir.headers.get("Location", "")
+                tag = loc.split("/")[-1].lstrip("v") if "/tag/" in loc else ""
+                if tag:
+                    dl_url = f"https://github.com/{REPO_OWNER}/{REPO_NAME}/releases/download/v{tag}/dynamic-island-v{tag}-linux-x86_64.tar.gz"
+                    with self._lock:
+                        self.latest_version = tag
+                        self.download_url = dl_url
+                        if self._is_newer(self.latest_version, self.current_version):
+                            self.state = UpdateState.AVAILABLE
+                        else:
+                            self.state = UpdateState.LATEST
+                else:
+                    with self._lock:
                         self.state = UpdateState.LATEST
             else:
                 with self._lock:

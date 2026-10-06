@@ -92,6 +92,8 @@ from updater import Updater, UpdateState
 from privacy_service import PrivacyService, PrivacyState
 from weather_service import WeatherService, WeatherInfo
 from system_service import SystemService, SystemInfo
+from i18n import t, LANGUAGES, LANGUAGE_KEYS
+from config_service import ConfigService, EXPORTS_DIR
 
 try:
     from PIL import Image
@@ -152,7 +154,7 @@ COLOR_INDIGO: Tuple[float, float, float] = (0.49, 0.478, 1.0)
 CARRY_TIMER: float = 78.0
 CARRY_SHELF: float = 54.0
 
-SETTINGS_HEIGHT = 530.0
+SETTINGS_HEIGHT = 580.0
 
 SIZES: dict[View, Dims] = {
     View.IDLE: Dims(118, 34, 17),
@@ -1502,20 +1504,6 @@ class MainWindow(Gtk.Window):
                 self.set_targets()
                 play_sound("click")
                 return
-            bx, by, bw, bh = self._timer_btn_add1_rect
-            if bx <= lx <= bx + bw and by <= ly <= by + bh:
-                self._timer.add_minute(1)
-                self.sync_timer()
-                play_sound("click")
-                self.area.queue_draw()
-                return
-            bx, by, bw, bh = self._timer_btn_add5_rect
-            if bx <= lx <= bx + bw and by <= ly <= by + bh:
-                self._timer.add_minute(5)
-                self.sync_timer()
-                play_sound("click")
-                self.area.queue_draw()
-                return
 
         if self._current_view == View.TIMER_SET:
             bx, by, bw, bh = self._timer_set_back_rect
@@ -1615,7 +1603,36 @@ class MainWindow(Gtk.Window):
                     self.area.queue_draw()
                     return
 
-            cache_ry = py + row_y_start + len(setting_keys) * row_h
+            # Language row
+            lang_ry = py + row_y_start + len(setting_keys) * row_h
+            if px <= lx <= px + pw and lang_ry <= ly < lang_ry + row_h:
+                cur_lang = Settings.language
+                cur_idx = LANGUAGE_KEYS.index(cur_lang) if cur_lang in LANGUAGE_KEYS else 0
+                Settings.language = LANGUAGE_KEYS[(cur_idx + 1) % len(LANGUAGE_KEYS)]
+                play_sound("click")
+                self.area.queue_draw()
+                return
+
+            # Export config row
+            exp_ry = py + row_y_start + (len(setting_keys) + 1) * row_h
+            if px <= lx <= px + pw and exp_ry <= ly < exp_ry + row_h:
+                ok, path_or_err = ConfigService.export_config()
+                if ok:
+                    self._shelf.add([path_or_err])
+                    self.show_notice(Glyph.Check, COLOR_GREEN, t("config_applied"), Path(path_or_err).name, seconds=2.5)
+                else:
+                    self.show_notice(Glyph.Cross, COLOR_RED, t("config_error"), path_or_err, seconds=3.0)
+                play_sound("click")
+                return
+
+            # Import config row
+            imp_ry = py + row_y_start + (len(setting_keys) + 2) * row_h
+            if px <= lx <= px + pw and imp_ry <= ly < imp_ry + row_h:
+                self.pick_and_import_config()
+                play_sound("click")
+                return
+
+            cache_ry = py + row_y_start + (len(setting_keys) + 3) * row_h
             if px <= lx <= px + pw and cache_ry <= ly < cache_ry + row_h:
                 clear_all_cache()
                 self._cache_feedback_until = time.monotonic() + 2.5
@@ -1623,7 +1640,7 @@ class MainWindow(Gtk.Window):
                 self.area.queue_draw()
                 return
 
-            upd_ry = py + row_y_start + (len(setting_keys) + 1) * row_h
+            upd_ry = py + row_y_start + (len(setting_keys) + 4) * row_h
             if px <= lx <= px + pw and upd_ry <= ly < upd_ry + row_h:
                 self.open_panel(Panel.UPDATE)
                 self._updater.check_async()
@@ -1912,6 +1929,15 @@ class MainWindow(Gtk.Window):
                 if tx <= lx <= tx + 56.0 and ty <= ly <= ty + 56.0:
                     if self._dragging_shelf:
                         return
+                    if getattr(item, "is_config", False) or item.path.lower().endswith(".dni"):
+                        ok, msg = ConfigService.import_config(item.path, adapt_screen=True)
+                        if ok:
+                            self.show_notice(Glyph.Check, COLOR_GREEN, t("config_applied"), item.name, seconds=2.5)
+                            self.sync_all_imported_settings()
+                        else:
+                            self.show_notice(Glyph.Cross, COLOR_RED, t("config_error"), msg, seconds=3.0)
+                        play_sound("click")
+                        return
                     self._shelf.open_item(item)
                     self.open_panel(Panel.NONE)
                     self.update_view()
@@ -2179,7 +2205,7 @@ class MainWindow(Gtk.Window):
     def get_settings_layout(self, ph: float) -> tuple[float, float]:
         row_y_start = 44.0
         avail_for_rows = ph - row_y_start - 12.0
-        row_h = max(24.0, min(36.0, avail_for_rows / 14.0))
+        row_h = max(24.0, min(36.0, avail_for_rows / 17.0))
         return row_y_start, row_h
 
     def get_look_layout(self, ph: float) -> tuple[float, float, float]:
@@ -2207,14 +2233,18 @@ class MainWindow(Gtk.Window):
                 extra = 18.0 if (self._privacy.mic_active and self._privacy.camera_active) else 10.0
                 w += extra
             return d.with_w(w)
+        if view == View.TIMER:
+            timer_fmt = self._timer.formatted if self._timer.active else "25:00"
+            w = 162.0 if len(timer_fmt) > 5 else d.w
+            return d.with_w(w)
         if view == View.MEDIA:
             return d.with_w(self._media_width)
         if view == View.MEDIA_BIG and self._player_room:
             return d.with_h(PLAYER_HEIGHT + self._player_lyric_h)
         if view == View.SETTINGS:
             scale_val = max(0.01, self._size.value)
-            max_screen_h = (self.win_height - 60.0) / scale_val if self.win_height > 200 else 530.0
-            settings_h = max(380.0, min(530.0, max_screen_h))
+            max_screen_h = (self.win_height - 60.0) / scale_val if self.win_height > 200 else 580.0
+            settings_h = max(380.0, min(580.0, max_screen_h))
             return Dims(320.0, settings_h, 34)
         if view == View.LOOK:
             scale_val = max(0.01, self._size.value)
@@ -2316,6 +2346,38 @@ class MainWindow(Gtk.Window):
 
     def sync_accent(self) -> None:
         self._accent_color = self.accent
+
+    def pick_and_import_config(self) -> None:
+        dni_files = []
+        if EXPORTS_DIR.is_dir():
+            dni_files = sorted(list(EXPORTS_DIR.glob("*.dni")), key=lambda p: p.stat().st_mtime, reverse=True)
+        if dni_files:
+            latest = str(dni_files[0])
+            ok, msg = ConfigService.import_config(latest, adapt_screen=True)
+            if ok:
+                self.show_notice(Glyph.Check, COLOR_GREEN, t("config_applied"), dni_files[0].name, seconds=2.5)
+                self.sync_all_imported_settings()
+            else:
+                self.show_notice(Glyph.Cross, COLOR_RED, t("config_error"), msg, seconds=3.0)
+        else:
+            self.show_notice(Glyph.Look, COLOR_INDIGO, t("config_error"), "Положите .dni на Полку", seconds=2.5)
+
+    def sync_all_imported_settings(self) -> None:
+        self._size.tune(320, 26)
+        self._size.target = Settings.scale / 100.0
+        self._gap.target = float(Settings.gap)
+        self._radius.target = float(Settings.radius)
+        self._glass.target = float(Settings.glass)
+        self._height.target = float(Settings.height)
+        for key, tog in self._toggles.items():
+            if hasattr(Settings, key):
+                tog.set_state(bool(getattr(Settings, key)), animate=True)
+        self.sync_rim(snap=True)
+        self.sync_accent()
+        self.track_lyrics()
+        self.update_lyric()
+        self.set_targets()
+        self.area.queue_draw()
 
     def sync_rim(self, snap: bool = False) -> None:
         self._goo.set_rim_enabled(Settings.rim)
@@ -4048,11 +4110,13 @@ class MainWindow(Gtk.Window):
             color=tint,
             thickness=2.5,
         )
+        timer_text = self._timer.formatted if self._timer.active else "25:00"
+        font_sz = 12.0 if len(timer_text) > 5 else 13.5
         self._digits_timer.render(
             cr,
             x=px + pw - 14.0,
             y=py + ph / 2.0,
-            font_size=13.5,
+            font_size=font_sz,
             color=tint,
             align="right",
             valign="center",
@@ -4649,9 +4713,10 @@ class MainWindow(Gtk.Window):
             return
 
         render_icon(cr, Glyph.Back, px + 20.0, py + 18.0, 10.0, COLOR_DIM[:3], alpha=0.6 * alpha)
-        draw_text(cr, "ПОЛКА", px + 36.0, py + 23.0, font_size=10.5, bold=True, color=COLOR_DIM[:3], alpha=0.6 * alpha, align="left", valign="center")
+        draw_text(cr, t("shelf_title"), px + 36.0, py + 23.0, font_size=10.5, bold=True, color=COLOR_DIM[:3], alpha=0.6 * alpha, align="left", valign="center")
 
-        text_w, _ = measure_text(cr, "Очистить", pw, 10.5 * Settings.text_factor())
+        clear_label = t("shelf_clear")
+        text_w, _ = measure_text(cr, clear_label, pw, 10.5 * Settings.text_factor())
         btn_clear_w = max(66.0, text_w + 16.0)
         btn_clear_x = px + pw - 18.0 - btn_clear_w
         btn_clear_y = py + 12.0
@@ -4671,7 +4736,7 @@ class MainWindow(Gtk.Window):
         draw_rounded_rect(cr, btn_clear_x, btn_clear_y, btn_clear_w, 24.0, 12.0)
         cr.set_source_rgba(1.0, 1.0, 1.0, 0.12 * alpha)
         cr.fill()
-        draw_text(cr, "Очистить", btn_clear_x + btn_clear_w / 2.0, btn_clear_y + 12.0, font_size=10.5, bold=False, color=COLOR_WHITE[:3], alpha=alpha, align="center", valign="center")
+        draw_text(cr, clear_label, btn_clear_x + btn_clear_w / 2.0, btn_clear_y + 12.0, font_size=10.5, bold=False, color=COLOR_WHITE[:3], alpha=alpha, align="center", valign="center")
         cr.restore()
 
         strip_x = px + 18.0
@@ -4801,35 +4866,11 @@ class MainWindow(Gtk.Window):
         cr.set_source_rgba(1.0, 1.0, 1.0, 0.9 * alpha)
         cr.stroke()
 
-        # Quick +1m chip
-        b1_x = px + 118.0
-        b1_y = py + (ph - 28.0) / 2.0
-        self._timer_btn_add1_rect = (b1_x, b1_y, 38.0, 28.0)
-        draw_rounded_rect(cr, b1_x, b1_y, 38.0, 28.0, 14.0)
-        cr.set_source_rgba(1.0, 1.0, 1.0, 0.12 * alpha)
-        cr.fill_preserve()
-        cr.set_source_rgba(1.0, 1.0, 1.0, 0.2 * alpha)
-        cr.set_line_width(1.0)
-        cr.stroke()
-        draw_text(cr, "+1м", b1_x + 19.0, py + ph / 2.0, font_size=11.5, bold=True, color=COLOR_WHITE, alpha=alpha, align="center", valign="center")
-
-        # Quick +5m chip
-        b5_x = px + 162.0
-        b5_y = py + (ph - 28.0) / 2.0
-        self._timer_btn_add5_rect = (b5_x, b5_y, 38.0, 28.0)
-        draw_rounded_rect(cr, b5_x, b5_y, 38.0, 28.0, 14.0)
-        cr.set_source_rgba(1.0, 1.0, 1.0, 0.12 * alpha)
-        cr.fill_preserve()
-        cr.set_source_rgba(1.0, 1.0, 1.0, 0.2 * alpha)
-        cr.set_line_width(1.0)
-        cr.stroke()
-        draw_text(cr, "+5м", b5_x + 19.0, py + ph / 2.0, font_size=11.5, bold=True, color=COLOR_WHITE, alpha=alpha, align="center", valign="center")
-
-        status_prefix = "На паузе" if self._timer.is_paused else ("Завершается!" if self._timer.is_urgent else "Идёт отсчёт")
+        status_prefix = t("timer_paused") if self._timer.is_paused else (t("timer_finishing") if self._timer.is_urgent else t("timer_counting"))
         draw_text(cr, f"{status_prefix} · {format_time(self._timer.total)}", px + pw - 20.0, py + 25.0, font_size=11.5, color=self._timer_tint, alpha=0.85 * alpha, align="right", valign="center")
         if self._timer.active and self._digits_big_timer.text != self._timer.formatted:
             self._digits_big_timer.set_text(self._timer.formatted)
-        digits_size = 32.0 if len(self._timer.formatted) > 5 else 38.0
+        digits_size = 28.0 if len(self._timer.formatted) > 5 else 38.0
         self._digits_big_timer.render(cr, px + pw - 20.0, py + 60.0, font_size=digits_size, color=(self._timer_tint[0], self._timer_tint[1], self._timer_tint[2], alpha), align="right", valign="center")
 
     def render_timer_set(self, cr: cairo.Context, px: float, py: float, pw: float, ph: float, alpha: float) -> None:
@@ -4895,17 +4936,17 @@ class MainWindow(Gtk.Window):
         draw_text(cr, "Запустить", px + pw / 2.0, start_y + 18.0, font_size=13.5, bold=True, color=(0.0, 0.0, 0.0), alpha=alpha, align="center", valign="center")
 
     def render_menu(self, cr: cairo.Context, px: float, py: float, pw: float, ph: float, alpha: float) -> None:
-        draw_text(cr, "DYNAMIC ISLAND", px + 22.0, py + 24.0, font_size=10.5, bold=True, color=COLOR_DIM[:3], alpha=0.6 * alpha, align="left", valign="center")
+        draw_text(cr, t("menu_title"), px + 22.0, py + 24.0, font_size=10.5, bold=True, color=COLOR_DIM[:3], alpha=0.6 * alpha, align="left", valign="center")
 
         self._row_list_menu.render_highlight(cr, w=pw - 20.0, x=px + 10.0)
 
         shelf_count_str = str(len(self._shelf.items)) if self._shelf.items else ""
         rows = [
-            (Glyph.Clock, "Таймер", self._timer.formatted if self._timer.active else "", COLOR_ORANGE if self._timer.active else COLOR_DIM[:3]),
-            (Glyph.Tray, "Полка", shelf_count_str, COLOR_DIM[:3]),
-            (Glyph.Gear, "Настройки", "", COLOR_DIM[:3]),
-            (Glyph.Look, "Оформление", "", COLOR_DIM[:3]),
-            (Glyph.Power, "Закрыть остров", "", COLOR_RED),
+            (Glyph.Clock, t("menu_timer"), self._timer.formatted if self._timer.active else "", COLOR_ORANGE if self._timer.active else COLOR_DIM[:3]),
+            (Glyph.Tray, t("menu_shelf"), shelf_count_str, COLOR_DIM[:3]),
+            (Glyph.Gear, t("menu_settings"), "", COLOR_DIM[:3]),
+            (Glyph.Look, t("menu_look"), "", COLOR_DIM[:3]),
+            (Glyph.Power, t("menu_power"), "", COLOR_RED),
         ]
         row_y_start = py + 36.0
         row_h = 40.0
@@ -4927,23 +4968,23 @@ class MainWindow(Gtk.Window):
 
     def render_settings(self, cr: cairo.Context, px: float, py: float, pw: float, ph: float, alpha: float) -> None:
         render_icon(cr, Glyph.Back, px + 20.0, py + 18.0, 10.0, COLOR_DIM[:3], alpha=0.6 * alpha)
-        draw_text(cr, "НАСТРОЙКИ", px + 36.0, py + 23.0, font_size=10.5, bold=True, color=COLOR_DIM[:3], alpha=0.6 * alpha, align="left", valign="center")
+        draw_text(cr, t("settings_title"), px + 36.0, py + 23.0, font_size=10.5, bold=True, color=COLOR_DIM[:3], alpha=0.6 * alpha, align="left", valign="center")
 
         self._row_list_settings.render_highlight(cr, w=pw - 20.0, x=px + 10.0)
 
         rows = [
-            (Glyph.Lines, "Текст песен", "lyrics"),
-            (Glyph.Sparkle, "Эффекты текста", "lyric_effects"),
-            (Glyph.Rim, "Ободок острова", "rim"),
-            (Glyph.Mid, "Громкость приложения", "app_volume"),
-            (Glyph.Wifi, "Уведомления о сети", "network"),
-            (Glyph.Mic, "Индикаторы приватности", "privacy_indicators"),
-            (Glyph.Sun, "Виджет погоды", "weather"),
-            (Glyph.Cpu, "Мониторинг системы", "system_stats"),
-            (Glyph.Expand, "Скрывать на полном экране", "hide_fullscreen"),
-            (Glyph.Clock, "Задержка при анимации", "click_lock"),
-            (Glyph.Linux, "Запускать при старте", "autostart"),
-            (Glyph.Lines, "Заглавная буква в названии", "capitalize_title"),
+            (Glyph.Lines, t("lyrics"), "lyrics"),
+            (Glyph.Sparkle, t("lyric_effects"), "lyric_effects"),
+            (Glyph.Rim, t("rim"), "rim"),
+            (Glyph.Mid, t("app_volume"), "app_volume"),
+            (Glyph.Wifi, t("network"), "network"),
+            (Glyph.Mic, t("privacy_indicators"), "privacy_indicators"),
+            (Glyph.Sun, t("weather"), "weather"),
+            (Glyph.Cpu, t("system_stats"), "system_stats"),
+            (Glyph.Expand, t("hide_fullscreen"), "hide_fullscreen"),
+            (Glyph.Clock, t("click_lock"), "click_lock"),
+            (Glyph.Linux, t("autostart"), "autostart"),
+            (Glyph.Lines, t("capitalize_title"), "capitalize_title"),
         ]
         row_y_start, row_h = self.get_settings_layout(ph)
         for idx, (glyph, label, key) in enumerate(rows):
@@ -4952,19 +4993,38 @@ class MainWindow(Gtk.Window):
             draw_text(cr, label, px + 49.0, ry + row_h / 2.0, font_size=13.0, bold=False, color=COLOR_WHITE, alpha=alpha, align="left", valign="center")
             self._toggles[key].render(cr, px + pw - 58.0, ry + (row_h - 24.0) / 2.0, w=46.0, h=24.0)
 
-        # Row 9: Clear cache
-        cache_ry = py + row_y_start + len(rows) * row_h
+        # Row 13: Language
+        lang_ry = py + row_y_start + len(rows) * row_h
+        cur_lang_name = LANGUAGES.get(Settings.language, "Русский")
+        render_icon(cr, Glyph.Gear, px + 22.0, lang_ry + (row_h - 17.0) / 2.0, 17.0, COLOR_DIM[:3], alpha=alpha)
+        draw_text(cr, t("language"), px + 49.0, lang_ry + row_h / 2.0, font_size=13.0, bold=False, color=COLOR_WHITE, alpha=alpha, align="left", valign="center")
+        draw_text(cr, cur_lang_name, px + pw - 24.0, lang_ry + row_h / 2.0, font_size=13.0, bold=False, color=COLOR_DIM[:3], alpha=alpha, align="right", valign="center")
+
+        # Row 14: Export config
+        exp_ry = py + row_y_start + (len(rows) + 1) * row_h
+        render_icon(cr, Glyph.Sparkle, px + 22.0, exp_ry + (row_h - 17.0) / 2.0, 17.0, COLOR_DIM[:3], alpha=alpha)
+        draw_text(cr, t("export_config"), px + 49.0, exp_ry + row_h / 2.0, font_size=13.0, bold=False, color=COLOR_WHITE, alpha=alpha, align="left", valign="center")
+        draw_text(cr, ".dni", px + pw - 24.0, exp_ry + row_h / 2.0, font_size=12.5, bold=True, color=COLOR_DIM[:3], alpha=alpha, align="right", valign="center")
+
+        # Row 15: Import config
+        imp_ry = py + row_y_start + (len(rows) + 2) * row_h
+        render_icon(cr, Glyph.Look, px + 22.0, imp_ry + (row_h - 17.0) / 2.0, 17.0, COLOR_DIM[:3], alpha=alpha)
+        draw_text(cr, t("import_config"), px + 49.0, imp_ry + row_h / 2.0, font_size=13.0, bold=False, color=COLOR_WHITE, alpha=alpha, align="left", valign="center")
+        render_icon(cr, Glyph.Chevron, px + pw - 26.0, imp_ry + (row_h - 11.0) / 2.0, 11.0, COLOR_DIM[:3], alpha=alpha)
+
+        # Row 16: Clear cache
+        cache_ry = py + row_y_start + (len(rows) + 3) * row_h
         cache_cleared = time.monotonic() < self._cache_feedback_until
-        cache_str = "Очищено!" if cache_cleared else get_cache_size_str()
+        cache_str = t("cache_cleared") if cache_cleared else get_cache_size_str()
         cache_color = COLOR_GREEN if cache_cleared else COLOR_DIM[:3]
         render_icon(cr, Glyph.Tray, px + 22.0, cache_ry + (row_h - 17.0) / 2.0, 17.0, cache_color, alpha=alpha)
-        draw_text(cr, "Очистить кэш", px + 49.0, cache_ry + row_h / 2.0, font_size=13.0, bold=False, color=COLOR_WHITE, alpha=alpha, align="left", valign="center")
+        draw_text(cr, t("clear_cache"), px + 49.0, cache_ry + row_h / 2.0, font_size=13.0, bold=False, color=COLOR_WHITE, alpha=alpha, align="left", valign="center")
         draw_text(cr, cache_str, px + pw - 24.0, cache_ry + row_h / 2.0, font_size=13.0, bold=False, color=cache_color, alpha=alpha, align="right", valign="center")
 
-        # Row 10: Update
-        upd_ry = py + row_y_start + (len(rows) + 1) * row_h
+        # Row 17: Update
+        upd_ry = py + row_y_start + (len(rows) + 4) * row_h
         render_icon(cr, Glyph.Sparkle, px + 22.0, upd_ry + (row_h - 17.0) / 2.0, 17.0, COLOR_ORANGE if self._updater.state == UpdateState.AVAILABLE else COLOR_DIM[:3], alpha=alpha)
-        draw_text(cr, "Обновление", px + 49.0, upd_ry + row_h / 2.0, font_size=13.0, bold=False, color=COLOR_WHITE, alpha=alpha, align="left", valign="center")
+        draw_text(cr, t("update"), px + 49.0, upd_ry + row_h / 2.0, font_size=13.0, bold=False, color=COLOR_WHITE, alpha=alpha, align="left", valign="center")
         draw_text(cr, f"v{self._updater.latest_version}", px + pw - 38.0, upd_ry + row_h / 2.0, font_size=13.0, bold=False, color=COLOR_DIM[:3], alpha=alpha, align="right", valign="center")
         render_icon(cr, Glyph.Chevron, px + pw - 26.0, upd_ry + (row_h - 11.0) / 2.0, 11.0, COLOR_DIM[:3], alpha=alpha)
 
@@ -5202,12 +5262,12 @@ class MainWindow(Gtk.Window):
         self._row_list_combo.render_highlight(cr, w=pw - 20.0, x=px + 10.0)
 
         split_labels = {
-            COMBO_SPLIT_ALL: "Все варианты",
-            COMBO_SPLIT_PUNCT: "По знакам",
-            COMBO_SPLIT_WORDS: "По словам",
-            COMBO_SPLIT_LINES: "Только строки",
+            COMBO_SPLIT_ALL: t("combo_split_all"),
+            COMBO_SPLIT_PUNCT: t("combo_split_punct"),
+            COMBO_SPLIT_WORDS: t("combo_split_words"),
+            COMBO_SPLIT_LINES: t("combo_split_lines"),
         }
-        cur_split_lbl = split_labels.get(Settings.combo_split_mode, "Все варианты")
+        cur_split_lbl = split_labels.get(Settings.combo_split_mode, t("combo_split_all"))
 
         style_labels = {
             COMBO_STYLE_RU_X: "х1, х2...",
@@ -5221,21 +5281,21 @@ class MainWindow(Gtk.Window):
         cur_style_lbl = style_labels.get(Settings.combo_counter_style, "х1, х2...")
 
         min_len_labels = {
-            1: "Любая длина",
-            2: "От 2 букв",
-            3: "От 3 букв",
-            4: "От 4 букв",
+            1: "1",
+            2: "2",
+            3: "3",
+            4: "4",
         }
-        cur_len_lbl = min_len_labels.get(Settings.combo_min_word_len, "От 2 букв")
+        cur_len_lbl = min_len_labels.get(Settings.combo_min_word_len, "2")
 
         rows = [
-            (Glyph.Pulse, "Включить комбо", "toggle", "combo_enabled"),
-            (Glyph.Lines, "Порог повторов", "cycle", f"От {Settings.combo_min_repeats} раз"),
-            (Glyph.Sparkle, "Стиль счётчика", "cycle", cur_style_lbl),
-            (Glyph.Lines, "Режим разбивки", "cycle", cur_split_lbl),
-            (Glyph.Note, "Игнорировать эдлибы", "toggle", "combo_ignore_adlibs"),
-            (Glyph.Look, "Очищать скобки", "toggle", "combo_strip_brackets"),
-            (Glyph.Expand, "Минимум букв", "cycle", cur_len_lbl),
+            (Glyph.Pulse, t("combo_enabled"), "toggle", "combo_enabled"),
+            (Glyph.Lines, t("combo_repeats"), "cycle", f"{Settings.combo_min_repeats}"),
+            (Glyph.Sparkle, t("combo_style"), "cycle", cur_style_lbl),
+            (Glyph.Lines, t("combo_split"), "cycle", cur_split_lbl),
+            (Glyph.Note, t("combo_ignore_adlibs"), "toggle", "combo_ignore_adlibs"),
+            (Glyph.Look, t("combo_strip_brackets"), "toggle", "combo_strip_brackets"),
+            (Glyph.Expand, t("combo_min_word_len"), "cycle", cur_len_lbl),
         ]
 
         row_y_start = 104.0
