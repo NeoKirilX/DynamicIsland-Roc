@@ -556,13 +556,6 @@ class MainWindow(Gtk.Window):
         self._drag_start_y: float = 0.0
         self._drag_orig_pos_x: int = 0
         self._drag_orig_pos_y: int = 0
-        self._pos_editing: Optional[str] = None
-        self._pos_input_buf: str = ""
-        self._pos_edit_orig_val: int = 0
-        self._pos_long_pressed: bool = False
-        self._pos_press_timer_id: Optional[int] = None
-        self._pos_press_start_pos: tuple[float, float] = (0.0, 0.0)
-        self._pos_press_row: Optional[int] = None
 
         self._forced: Optional[View] = None
         if forced_view:
@@ -1116,20 +1109,6 @@ class MainWindow(Gtk.Window):
                 self._cancel_grab()
                 return
 
-        if self._pos_press_timer_id is not None:
-            dx = x - self._pos_press_start_pos[0]
-            dy = y - self._pos_press_start_pos[1]
-            if math.hypot(dx, dy) > 12.0:
-                GLib.source_remove(self._pos_press_timer_id)
-                self._pos_press_timer_id = None
-                self._pos_press_row = None
-                if self._current_view == View.LOOK:
-                    self._dragging_look = True
-                    self._drag_start_x = self._pos_press_start_pos[0]
-                    self._drag_start_y = self._pos_press_start_pos[1]
-                    self._drag_orig_pos_x = Settings.pos_x
-                    self._drag_orig_pos_y = Settings.pos_y
-
         if self._dragging_look and self._current_view == View.LOOK:
             step = self.get_modifier_step(controller)
             dx = x - self._drag_start_x
@@ -1318,42 +1297,11 @@ class MainWindow(Gtk.Window):
                 self._row_list_settings.set_pressed(True)
             elif self._current_view == View.LOOK:
                 self._row_list_look.set_pressed(True)
-                lx, ly = self._screen_to_local(x, y)
-                px, py, pw, ph, pr, bubble = self._get_pill_and_bubble_rects()
-                row_y_start, row_h, swatch_y = self.get_look_layout(ph)
-
-                clicked_pos_row = None
-                for idx in (1, 2):
-                    ry = py + row_y_start + idx * row_h
-                    if px + 10 <= lx <= px + pw - 10 and ry <= ly < ry + row_h:
-                        clicked_pos_row = idx
-                        break
-
-                if self._pos_press_timer_id is not None:
-                    GLib.source_remove(self._pos_press_timer_id)
-                    self._pos_press_timer_id = None
-
-                if clicked_pos_row is not None:
-                    self._pos_press_row = clicked_pos_row
-                    self._pos_press_start_pos = (x, y)
-                    self._pos_long_pressed = False
-                    self._dragging_look = False
-
-                    def _trigger_pos_long_press(row_idx: int) -> bool:
-                        self._pos_press_timer_id = None
-                        if self._current_view == View.LOOK and self._pos_press_row == row_idx:
-                            self._pos_long_pressed = True
-                            self._start_pos_editing('y' if row_idx == 1 else 'x')
-                        return False
-
-                    self._pos_press_timer_id = GLib.timeout_add(350, _trigger_pos_long_press, clicked_pos_row)
-                else:
-                    self._pos_press_row = None
-                    self._dragging_look = True
-                    self._drag_start_x = x
-                    self._drag_start_y = y
-                    self._drag_orig_pos_x = Settings.pos_x
-                    self._drag_orig_pos_y = Settings.pos_y
+                self._dragging_look = True
+                self._drag_start_x = x
+                self._drag_start_y = y
+                self._drag_orig_pos_x = Settings.pos_x
+                self._drag_orig_pos_y = Settings.pos_y
 
             self._pressed = True
             self.set_targets()
@@ -1571,52 +1519,11 @@ class MainWindow(Gtk.Window):
                 return
 
         if self._current_view == View.LOOK:
-            if self._pos_press_timer_id is not None:
-                GLib.source_remove(self._pos_press_timer_id)
-                self._pos_press_timer_id = None
-
-            if self._pos_long_pressed:
-                self._pos_long_pressed = False
-                self._pos_press_row = None
-                self._dragging_look = False
-                return
-
             if self._dragging_look:
                 did_drag = abs(x - self._drag_start_x) >= 4 or abs(y - self._drag_start_y) >= 4
                 self._dragging_look = False
                 if did_drag:
                     return
-
-            row_y_start, row_h, swatch_y = self.get_look_layout(ph)
-
-            if self._pos_editing is not None:
-                edit_idx = 1 if self._pos_editing == 'y' else 2
-                ry = py + row_y_start + edit_idx * row_h
-                if ry <= ly < ry + row_h:
-                    if px + 195 <= lx <= px + 225:
-                        self._pos_input_buf = "0"
-                        if self._pos_editing == 'y':
-                            self.set_pos_y(0)
-                        else:
-                            self.set_pos_x(0)
-                        play_sound("click")
-                        self.area.queue_draw()
-                        return
-                    elif px + 227 <= lx <= px + 287:
-                        self._pos_input_buf = str(self._pos_edit_orig_val)
-                        if self._pos_editing == 'y':
-                            self.set_pos_y(self._pos_edit_orig_val)
-                        else:
-                            self.set_pos_x(self._pos_edit_orig_val)
-                        play_sound("click")
-                        self.area.queue_draw()
-                        return
-                    elif px + 289 <= lx <= px + 338:
-                        self._confirm_pos_editing()
-                        play_sound("click")
-                        return
-                else:
-                    self._confirm_pos_editing()
 
             if px <= lx <= px + 150 and py + 12 <= ly <= py + 40:
                 self.open_panel(Panel.MENU)
@@ -1624,6 +1531,7 @@ class MainWindow(Gtk.Window):
                 self.set_targets()
                 return
 
+            row_y_start, row_h, swatch_y = self.get_look_layout(ph)
             mod_step = self.get_modifier_step()
 
             if px <= lx <= px + pw:
@@ -1636,13 +1544,9 @@ class MainWindow(Gtk.Window):
                             self.set_scale(new_scale)
                             return
                         elif idx == 1:
-                            if self._pos_editing == 'y':
-                                return
                             self.set_pos_y(Settings.pos_y + mod_step)
                             return
                         elif idx == 2:
-                            if self._pos_editing == 'x':
-                                return
                             self.set_pos_x(Settings.pos_x + mod_step)
                             return
                         elif idx == 3:
@@ -2173,11 +2077,6 @@ class MainWindow(Gtk.Window):
     def open_panel(self, panel: Panel) -> None:
         if panel != self._panel and panel != Panel.NONE:
             self._click_lock_until = time.monotonic() + 0.38
-        if panel != Panel.LOOK:
-            self._pos_editing = None
-            if self._pos_press_timer_id is not None:
-                GLib.source_remove(self._pos_press_timer_id)
-                self._pos_press_timer_id = None
         self._panel = panel
         self._transient = None
         self._transient_expiry = 0.0
@@ -3171,37 +3070,6 @@ class MainWindow(Gtk.Window):
             self._digits_setup.set_text(f"{self._minutes:02d}:00")
         self.area.queue_draw()
 
-    def _start_pos_editing(self, axis: str) -> None:
-        self._pos_editing = axis
-        curr = Settings.pos_y if axis == 'y' else Settings.pos_x
-        self._pos_edit_orig_val = curr
-        self._pos_input_buf = str(curr)
-        play_sound("charging")
-        self.area.queue_draw()
-
-    def _confirm_pos_editing(self) -> None:
-        if self._pos_editing is not None and self._pos_input_buf and self._pos_input_buf != "-":
-            try:
-                val = int(self._pos_input_buf)
-                if self._pos_editing == 'y':
-                    self.set_pos_y(max(0, val))
-                else:
-                    self.set_pos_x(val)
-            except ValueError:
-                pass
-        self._pos_editing = None
-        self.area.queue_draw()
-
-    def _revert_pos_editing(self) -> None:
-        if self._pos_editing is not None:
-            if self._pos_editing == 'y':
-                self.set_pos_y(self._pos_edit_orig_val)
-            else:
-                self.set_pos_x(self._pos_edit_orig_val)
-            self._pos_editing = None
-            play_sound("click")
-            self.area.queue_draw()
-
     def get_modifier_step(self, controller: Optional[Any] = None) -> int:
         state = 0
         if controller and hasattr(controller, "get_current_event_state"):
@@ -3220,69 +3088,6 @@ class MainWindow(Gtk.Window):
     ) -> bool:
         if self._current_view != View.LOOK:
             return False
-
-        if self._pos_editing is not None:
-            if keyval in (Gdk.KEY_Escape, 0xFF1B):
-                self._revert_pos_editing()
-                return True
-            elif keyval in (Gdk.KEY_Return, Gdk.KEY_KP_Enter, 0xFF0D, 0xFF8D):
-                self._confirm_pos_editing()
-                play_sound("click")
-                return True
-            elif keyval in (Gdk.KEY_BackSpace, 0xFF08):
-                if len(self._pos_input_buf) > 0:
-                    self._pos_input_buf = self._pos_input_buf[:-1]
-                    if self._pos_input_buf and self._pos_input_buf != "-":
-                        try:
-                            val = int(self._pos_input_buf)
-                            if self._pos_editing == 'y':
-                                self.set_pos_y(max(0, val))
-                            else:
-                                self.set_pos_x(val)
-                        except ValueError:
-                            pass
-                    self.area.queue_draw()
-                return True
-            elif keyval in (Gdk.KEY_minus, 0x002D, Gdk.KEY_KP_Subtract, 0xFFAD):
-                if self._pos_editing == 'x':
-                    if self._pos_input_buf.startswith('-'):
-                        self._pos_input_buf = self._pos_input_buf[1:]
-                    else:
-                        self._pos_input_buf = '-' + self._pos_input_buf
-                    if self._pos_input_buf and self._pos_input_buf != "-":
-                        try:
-                            self.set_pos_x(int(self._pos_input_buf))
-                        except ValueError:
-                            pass
-                    self.area.queue_draw()
-                return True
-            elif (Gdk.KEY_0 <= keyval <= Gdk.KEY_9) or (0xFFB0 <= keyval <= 0xFFB9):
-                digit = chr(keyval - 0xFFB0 + ord('0')) if keyval >= 0xFFB0 else chr(keyval)
-                if len(self._pos_input_buf) < 7:
-                    if self._pos_input_buf == "0":
-                        self._pos_input_buf = digit
-                    else:
-                        self._pos_input_buf += digit
-                    try:
-                        val = int(self._pos_input_buf)
-                        if self._pos_editing == 'y':
-                            self.set_pos_y(max(0, val))
-                        else:
-                            self.set_pos_x(val)
-                    except ValueError:
-                        pass
-                    self.area.queue_draw()
-                return True
-            elif keyval in (Gdk.KEY_r, Gdk.KEY_R, 0x0072, 0x0052) or ((state & Gdk.ModifierType.CONTROL_MASK) and keyval in (Gdk.KEY_z, Gdk.KEY_Z, 0x007a, 0x005a)):
-                self._pos_input_buf = str(self._pos_edit_orig_val)
-                if self._pos_editing == 'y':
-                    self.set_pos_y(self._pos_edit_orig_val)
-                else:
-                    self.set_pos_x(self._pos_edit_orig_val)
-                play_sound("click")
-                self.area.queue_draw()
-                return True
-
         step = 50 if (state & Gdk.ModifierType.CONTROL_MASK) else (10 if (state & Gdk.ModifierType.SHIFT_MASK) else 1)
         if keyval in (Gdk.KEY_Left, 0xFF51):
             self.set_pos_x(Settings.pos_x - step)
@@ -4663,83 +4468,6 @@ class MainWindow(Gtk.Window):
         row_y_start, row_h, swatch_y = self.get_look_layout(ph)
         for idx, (glyph, label, val_text) in enumerate(rows):
             ry = py + row_y_start + idx * row_h
-            if self._pos_editing is not None and idx in (1, 2) and self._pos_editing == ('y' if idx == 1 else 'x'):
-                axis = 'y' if idx == 1 else 'x'
-                accent_col = self.accent
-                cr.save()
-                Goo._add_rounded_rect_path(cr, px + 10.0, ry + 2.0, pw - 20.0, row_h - 4.0, 8.0)
-                cr.set_source_rgba(accent_col[0], accent_col[1], accent_col[2], 0.15 * alpha)
-                cr.fill_preserve()
-                cr.set_source_rgba(accent_col[0], accent_col[1], accent_col[2], 0.6 * alpha)
-                cr.set_line_width(1.0)
-                cr.stroke()
-                cr.restore()
-
-                render_icon(cr, glyph, px + 22.0, ry + (row_h - 17.0) / 2.0, 17.0, accent_col, alpha=alpha)
-                short_lbl = "Позиция Y:" if axis == 'y' else "Позиция X:"
-                draw_text(cr, short_lbl, px + 47.0, ry + row_h / 2.0, font_size=12.0, bold=True, color=COLOR_WHITE, alpha=alpha, align="left", valign="center")
-
-                cur_time = time.monotonic()
-                cursor = "|" if int(cur_time * 2.5) % 2 == 0 else ""
-                disp_text = (self._pos_input_buf if self._pos_input_buf else "0") + cursor + " px"
-                ib_x = px + 124.0
-                ib_w = 66.0
-                ib_h = 22.0
-                ib_y = ry + (row_h - ib_h) / 2.0
-
-                cr.save()
-                Goo._add_rounded_rect_path(cr, ib_x, ib_y, ib_w, ib_h, 5.0)
-                cr.set_source_rgba(0.12, 0.12, 0.14, 0.95 * alpha)
-                cr.fill_preserve()
-                cr.set_source_rgba(accent_col[0], accent_col[1], accent_col[2], 0.8 * alpha)
-                cr.set_line_width(1.0)
-                cr.stroke()
-                cr.restore()
-                draw_text(cr, disp_text, ib_x + ib_w / 2.0, ry + row_h / 2.0, font_size=10.5, bold=True, color=COLOR_WHITE, alpha=alpha, align="center", valign="center")
-
-                btn0_x = px + 195.0
-                btn0_w = 26.0
-                btn0_h = 22.0
-                btn0_y = ry + (row_h - btn0_h) / 2.0
-                cr.save()
-                Goo._add_rounded_rect_path(cr, btn0_x, btn0_y, btn0_w, btn0_h, 5.0)
-                cr.set_source_rgba(0.22, 0.22, 0.25, 0.9 * alpha)
-                cr.fill_preserve()
-                cr.set_source_rgba(1.0, 1.0, 1.0, 0.15 * alpha)
-                cr.set_line_width(1.0)
-                cr.stroke()
-                cr.restore()
-                draw_text(cr, "0", btn0_x + btn0_w / 2.0, ry + row_h / 2.0, font_size=11.5, bold=True, color=COLOR_WHITE, alpha=alpha, align="center", valign="center")
-
-                btn_r_x = px + 227.0
-                btn_r_w = 58.0
-                btn_r_h = 22.0
-                btn_r_y = ry + (row_h - btn_r_h) / 2.0
-                cr.save()
-                Goo._add_rounded_rect_path(cr, btn_r_x, btn_r_y, btn_r_w, btn_r_h, 5.0)
-                cr.set_source_rgba(0.25, 0.18, 0.18, 0.9 * alpha)
-                cr.fill_preserve()
-                cr.set_source_rgba(1.0, 0.55, 0.4, 0.4 * alpha)
-                cr.set_line_width(1.0)
-                cr.stroke()
-                cr.restore()
-                draw_text(cr, "Откат", btn_r_x + btn_r_w / 2.0, ry + row_h / 2.0, font_size=11.0, bold=False, color=(1.0, 0.65, 0.5), alpha=alpha, align="center", valign="center")
-
-                btn_ok_x = px + 289.0
-                btn_ok_w = 46.0
-                btn_ok_h = 22.0
-                btn_ok_y = ry + (row_h - btn_ok_h) / 2.0
-                cr.save()
-                Goo._add_rounded_rect_path(cr, btn_ok_x, btn_ok_y, btn_ok_w, btn_ok_h, 5.0)
-                cr.set_source_rgba(0.18, 0.45, 0.28, 0.95 * alpha)
-                cr.fill_preserve()
-                cr.set_source_rgba(0.4, 0.9, 0.5, 0.6 * alpha)
-                cr.set_line_width(1.0)
-                cr.stroke()
-                cr.restore()
-                draw_text(cr, "OK", btn_ok_x + btn_ok_w / 2.0, ry + row_h / 2.0, font_size=11.0, bold=True, color=COLOR_WHITE, alpha=alpha, align="center", valign="center")
-                continue
-
             render_icon(cr, glyph, px + 22.0, ry + (row_h - 17.0) / 2.0, 17.0, COLOR_DIM[:3], alpha=alpha)
             draw_text(cr, label, px + 49.0, ry + row_h / 2.0, font_size=13.0, bold=False, color=COLOR_WHITE, alpha=alpha, align="left", valign="center")
             draw_text(cr, val_text, px + pw - 24.0, ry + row_h / 2.0, font_size=13.0, bold=False, color=COLOR_DIM[:3], alpha=alpha, align="right", valign="center")
