@@ -102,6 +102,23 @@ def test_views():
         assert win._current_view == View.LOOK
         print("  Panel.LOOK opened successfully ->", win._current_view)
 
+        # Test island height changes and layout stability
+        win.set_height(16)
+        win.set_targets()
+        d_look = win.size_of(View.LOOK)
+        assert win._h.target == d_look.h, f"Expanded panel height should remain {d_look.h}, got {win._h.target}"
+        win._h.value = win._h.target
+        px, py, pw, ph, _, _ = win._get_pill_and_bubble_rects()
+        assert ph == d_look.h, f"Pill rect height should match target {d_look.h}, got {ph}"
+        r_start, r_h, _ = win.get_look_layout(ph)
+        # Test row 7 ("Высота острова") layout position
+        r7_y = py + r_start + 7 * r_h
+        win._row_list_look.move_to(r7_y, r_h, 7)
+        assert win._row_list_look.hover_idx == 7
+        assert win._row_list_look._top.target == r7_y
+        win.set_height(0)
+        win.set_targets()
+
         win.open_panel(Panel.TEXT_ANIM)
         win.update_view()
         assert win._panel == Panel.TEXT_ANIM

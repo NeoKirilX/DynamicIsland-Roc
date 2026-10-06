@@ -2160,7 +2160,7 @@ class MainWindow(Gtk.Window):
         taken = self._grab in ("pull", "lean")
 
         self._w.target = d.w + pull * 0.4 + abs(lean) * 0.6
-        self._h.target = d.h + pull + Settings.height
+        self._h.target = d.h + pull + (Settings.height if compact else 0)
         self._r.target = (d.r + pull * 0.3) * Settings.radius / 100.0
         self._lean.target = lean
         self._cover_scale.target = 0.85 if (self._current_view == View.MEDIA_BIG and not self._media.is_playing) else 1.0
@@ -2574,7 +2574,7 @@ class MainWindow(Gtk.Window):
         size = max(0.01, self._size.value)
         scale = max(0.01, self._scale.value)
         w = max(24.0, self._w.value)
-        h = max(24.0, self._h.value + Settings.height)
+        h = max(24.0, self._h.value)
         cx = self.win_width / 2.0 + self._pos_x.value
         offset_y = self._offset.value + self._gap.value / size
         pill_top = offset_y * size
@@ -3426,8 +3426,8 @@ class MainWindow(Gtk.Window):
         size = max(0.01, self._size.value)
         scale = max(0.01, self._scale.value)
         w = max(24.0, self._w.value)
-        h = max(24.0, self._h.value + Settings.height)
-        r = min(w / 2.0, min(h / 2.0, max(0.0, self._r.value * Settings.radius / 100.0)))
+        h = max(24.0, self._h.value)
+        r = min(w / 2.0, min(h / 2.0, max(0.0, self._r.value)))
 
         cx = width / 2.0 + self._pos_x.value + self._lean.value + self._shake_x
         offset_y = self._offset.value + self._gap.value / size
