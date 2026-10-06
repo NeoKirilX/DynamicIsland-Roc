@@ -52,6 +52,12 @@ class Glyph(Enum):
     Pulse = auto()
     Bolt = auto()
     VpnOff = auto()
+    Mic = auto()
+    Camera = auto()
+    Sun = auto()
+    Cloud = auto()
+    CloudRain = auto()
+    CloudSnow = auto()
 
 @dataclass(frozen=True)
 class Art:
@@ -199,6 +205,33 @@ ARTS: dict[Glyph, Art] = {
     Glyph.VpnOff: Art(
         lines="M12,2.8 L19.6,5.6 V11.4 C19.6,16.2 16.4,19.6 12,21.4 C7.6,19.6 4.4,16.2 4.4,11.4 V5.6 Z M4,4 L20,20",
         line=2.0,
+    ),
+    Glyph.Mic: Art(
+        solid="M12,4 C13.65,4 15,5.35 15,7 V12 C15,13.65 13.65,15 12,15 C10.35,15 9,13.65 9,12 V7 C9,5.35 10.35,4 12,4 Z",
+        lines="M6.5,11 C6.5,14 8.9,16.5 12,16.5 C15.1,16.5 17.5,14 17.5,11 M12,16.5 V20.5 M8.5,20.5 H15.5",
+        line=1.8,
+    ),
+    Glyph.Camera: Art(
+        lines="M3,8 H21 A2,2 0 0 1 23,10 V18 A2,2 0 0 1 21,20 H3 A2,2 0 0 1 1,18 V10 A2,2 0 0 1 3,8 Z M12,11 A3,3 0 1 0 12,17 A3,3 0 1 0 12,11 Z M7,5 H11 L12,8 H6 Z",
+        line=1.8,
+    ),
+    Glyph.Sun: Art(
+        solid="M12,8 A4,4 0 1 0 12,16 A4,4 0 1 0 12,8 Z",
+        lines="M12,2 V4.5 M12,19.5 V22 M2,12 H4.5 M19.5,12 H22 M4.9,4.9 L6.7,6.7 M17.3,17.3 L19.1,19.1 M4.9,19.1 L6.7,17.3 M17.3,6.7 L19.1,4.9",
+        line=1.8,
+    ),
+    Glyph.Cloud: Art(
+        solid="M7.5,18 H17 A4,4 0 0 0 17,10 A6,6 0 0 0 6,12 A3.5,3.5 0 0 0 7.5,18 Z",
+    ),
+    Glyph.CloudRain: Art(
+        solid="M7.5,16 H17 A3.5,3.5 0 0 0 17,9 A5,5 0 0 0 7.5,10 A3,3 0 0 0 7.5,16 Z",
+        lines="M8,18 L6.5,21.5 M12,18 L10.5,21.5 M16,18 L14.5,21.5",
+        line=1.8,
+    ),
+    Glyph.CloudSnow: Art(
+        solid="M7.5,16 H17 A3.5,3.5 0 0 0 17,9 A5,5 0 0 0 7.5,10 A3,3 0 0 0 7.5,16 Z",
+        lines="M8,19.5 H8.01 M12,19.5 H12.01 M16,19.5 H16.01 M10,21.5 H10.01 M14,21.5 H14.01",
+        line=2.4,
     ),
 }
 

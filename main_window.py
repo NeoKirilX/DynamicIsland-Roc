@@ -88,6 +88,8 @@ from toggle import Toggle
 from line_bar import LineBar
 from skip import Skip
 from updater import Updater, UpdateState
+from privacy_service import PrivacyService, PrivacyState
+from weather_service import WeatherService, WeatherInfo
 
 try:
     from PIL import Image
@@ -148,7 +150,7 @@ COLOR_INDIGO: Tuple[float, float, float] = (0.49, 0.478, 1.0)
 CARRY_TIMER: float = 78.0
 CARRY_SHELF: float = 54.0
 
-SETTINGS_HEIGHT = 490.0
+SETTINGS_HEIGHT = 530.0
 
 SIZES: dict[View, Dims] = {
     View.IDLE: Dims(118, 34, 17),
@@ -457,6 +459,8 @@ class MainWindow(Gtk.Window):
         self._network = NetworkService(on_changed=self.on_network_changed)
         self._timer = Countdown()
         self._alarm = Alarm()
+        self._privacy = PrivacyService(on_changed=self.on_privacy_changed)
+        self._weather = WeatherService(on_changed=self.on_weather_changed)
 
         self._goo = Goo()
         self._cover_small = Cover()
@@ -474,6 +478,9 @@ class MainWindow(Gtk.Window):
         self._digits_shelf_menu = Digits("0", down=True)
         self._digits_clock = Digits("00:00", down=True)
         self._digits_big_clock = Digits("00:00", down=True)
+        self._digits_weather = Digits("+20°", down=True)
+        if self._weather.has_weather and self._weather.current:
+            self._digits_weather.set_text(self._weather.current.temp_str)
         self._digits_charge = Digits("100%", down=True)
         self._digits_info_vol = Digits("0%", down=True)
         self._digits_info_headset = Digits("0%", down=True)
@@ -490,6 +497,9 @@ class MainWindow(Gtk.Window):
         self._row_list_combo = RowList()
         self._update_scroll = Spring(0.0, 240.0, 28.0)
         self._notch = Spring(1.0 if Settings.notch else 0.0, 240.0, 22.0)
+        self._privacy_mic_spring = Spring(1.0 if (self._privacy.mic_active and Settings.privacy_indicators) else 0.0, 260.0, 24.0)
+        self._privacy_cam_spring = Spring(1.0 if (self._privacy.camera_active and Settings.privacy_indicators) else 0.0, 260.0, 24.0)
+        self._weather_spring = Spring(1.0 if (Settings.weather and self._weather.has_weather) else 0.0, 220.0, 24.0)
         self._cache_feedback_until: float = 0.0
 
         self._preview_lines = [
@@ -514,6 +524,8 @@ class MainWindow(Gtk.Window):
             "rim": Toggle(Settings.rim),
             "app_volume": Toggle(Settings.app_volume),
             "network": Toggle(Settings.network),
+            "privacy_indicators": Toggle(Settings.privacy_indicators),
+            "weather": Toggle(Settings.weather),
             "hide_fullscreen": Toggle(Settings.hide_fullscreen),
             "click_lock": Toggle(Settings.click_lock),
             "autostart": Toggle(Settings.autostart),
@@ -573,6 +585,17 @@ class MainWindow(Gtk.Window):
         self._updater = Updater.get()
         self._updater.add_callback(lambda: GLib.idle_add(self.area.queue_draw))
         self._btn_update_rect: tuple[float, float, float, float] = (0.0, 0.0, 0.0, 0.0)
+
+        # Timer dynamic button hitboxes
+        self._timer_btn_toggle_rect: tuple[float, float, float, float] = (0.0, 0.0, 0.0, 0.0)
+        self._timer_btn_stop_rect: tuple[float, float, float, float] = (0.0, 0.0, 0.0, 0.0)
+        self._timer_btn_add1_rect: tuple[float, float, float, float] = (0.0, 0.0, 0.0, 0.0)
+        self._timer_btn_add5_rect: tuple[float, float, float, float] = (0.0, 0.0, 0.0, 0.0)
+        self._timer_set_back_rect: tuple[float, float, float, float] = (0.0, 0.0, 0.0, 0.0)
+        self._timer_set_minus_rect: tuple[float, float, float, float] = (0.0, 0.0, 0.0, 0.0)
+        self._timer_set_plus_rect: tuple[float, float, float, float] = (0.0, 0.0, 0.0, 0.0)
+        self._timer_set_preset_rects: list[tuple[float, float, float, float, int]] = []
+        self._timer_set_start_rect: tuple[float, float, float, float] = (0.0, 0.0, 0.0, 0.0)
 
         self._dragging_look: bool = False
         self._drag_start_x: float = 0.0
@@ -1207,7 +1230,7 @@ class MainWindow(Gtk.Window):
         elif self._current_view == View.SETTINGS:
             row_y_start, row_h = self.get_settings_layout(ph)
             hovered = None
-            for idx in range(12):
+            for idx in range(14):
                 ry = py + row_y_start + idx * row_h
                 if px + 10 <= lx <= px + pw - 10 and ry <= ly < ry + row_h:
                     hovered = idx
@@ -1441,51 +1464,71 @@ class MainWindow(Gtk.Window):
                 self.set_targets()
                 return
 
+        if self._current_view == View.TIMER:
+            self.open_panel(Panel.TIMER)
+            self.update_view()
+            self.set_targets()
+            return
+
         if self._current_view == View.TIMER_BIG:
-            if px + 14 <= lx <= px + 58 and py + 21 <= ly <= py + 71:
+            bx, by, bw, bh = self._timer_btn_toggle_rect
+            if bx <= lx <= bx + bw and by <= ly <= by + bh:
                 self._timer.toggle()
                 self.sync_timer()
                 play_sound("click")
+                self.area.queue_draw()
                 return
-            if px + 64 <= lx <= px + 104 and py + 21 <= ly <= py + 71:
+            bx, by, bw, bh = self._timer_btn_stop_rect
+            if bx <= lx <= bx + bw and by <= ly <= by + bh:
                 self.stop_timer()
                 self.open_panel(Panel.NONE)
                 self.update_view()
                 self.set_targets()
                 play_sound("click")
                 return
-            if px + 116 <= lx <= px + 158 and py + 21 <= ly <= py + 71:
+            bx, by, bw, bh = self._timer_btn_add1_rect
+            if bx <= lx <= bx + bw and by <= ly <= by + bh:
                 self._timer.add_minute(1)
                 self.sync_timer()
                 play_sound("click")
+                self.area.queue_draw()
                 return
-            if px + 160 <= lx <= px + 202 and py + 21 <= ly <= py + 71:
+            bx, by, bw, bh = self._timer_btn_add5_rect
+            if bx <= lx <= bx + bw and by <= ly <= by + bh:
                 self._timer.add_minute(5)
                 self.sync_timer()
                 play_sound("click")
+                self.area.queue_draw()
                 return
 
         if self._current_view == View.TIMER_SET:
-            if px + 16 <= lx <= px + 56 and py + 38 <= ly <= py + 78:
-                self.set_minutes(self._minutes - 1)
+            bx, by, bw, bh = self._timer_set_back_rect
+            if bx <= lx <= bx + bw and by <= ly <= by + bh:
+                self.open_panel(Panel.MENU)
+                self.update_view()
+                self.set_targets()
+                return
+            bx, by, bw, bh = self._timer_set_minus_rect
+            if bx <= lx <= bx + bw and by <= ly <= by + bh:
+                step = 5 if self._minutes > 15 else 1
+                self.set_minutes(self._minutes - step)
                 play_sound("click")
                 return
-            if px + pw - 56 <= lx <= px + pw - 16 and py + 38 <= ly <= py + 78:
-                self.set_minutes(self._minutes + 1)
+            bx, by, bw, bh = self._timer_set_plus_rect
+            if bx <= lx <= bx + bw and by <= ly <= by + bh:
+                step = 5 if self._minutes >= 15 else 1
+                self.set_minutes(self._minutes + step)
                 play_sound("click")
                 return
-            presets = [1, 5, 15, 25, 60]
-            chip_y = py + 98.0
-            chip_h = 28.0
-            chip_w = (pw - 28.0) / len(presets)
-            for idx, p_min in enumerate(presets):
-                cx_chip = px + 14.0 + idx * chip_w
-                if cx_chip <= lx <= cx_chip + chip_w and chip_y <= ly <= chip_y + chip_h:
+            for (cx_chip, cy_chip, cw_chip, ch_chip, p_min) in self._timer_set_preset_rects:
+                if cx_chip <= lx <= cx_chip + cw_chip and cy_chip <= ly <= cy_chip + ch_chip:
                     self.set_minutes(p_min)
                     play_sound("click")
                     return
-            if px + 16 <= lx <= px + pw - 16 and py + 138 <= ly <= py + 174:
+            bx, by, bw, bh = self._timer_set_start_rect
+            if bx <= lx <= bx + bw and by <= ly <= by + bh:
                 self.start_timer(self._minutes * 60)
+                play_sound("charging")
                 return
 
         if self._current_view == View.MENU:
@@ -1523,6 +1566,8 @@ class MainWindow(Gtk.Window):
                 "rim",
                 "app_volume",
                 "network",
+                "privacy_indicators",
+                "weather",
                 "hide_fullscreen",
                 "click_lock",
                 "autostart",
@@ -1544,6 +1589,14 @@ class MainWindow(Gtk.Window):
                         self.sync_rim(snap=True)
                     elif key == "lyrics":
                         self.track_lyrics()
+                    elif key == "privacy_indicators":
+                        self._apply_privacy_changed(self._privacy.state)
+                    elif key == "weather":
+                        if self._weather.current:
+                            self._apply_weather_changed(self._weather.current)
+                        else:
+                            self._weather_spring.target = 1.0 if Settings.weather else 0.0
+                            self.set_targets()
                     elif key == "hide_fullscreen":
                         self.check_fullscreen()
                     elif key == "capitalize_title":
@@ -1879,6 +1932,13 @@ class MainWindow(Gtk.Window):
             self.set_minutes(self._minutes + step)
             return True
 
+        if self._current_view == View.TIMER_BIG:
+            nudge = 60.0 if up else -60.0
+            self._timer.add_seconds(nudge)
+            self.sync_timer()
+            self.area.queue_draw()
+            return True
+
         if self._current_view == View.SHELF:
             max_scroll = max(0.0, len(self._shelf.items) * 68.0 - 4.0 - (SHELF_WIDE - 36.0))
             new_target = max(0.0, min(max_scroll, self._shelf_scroll.target - step * 68.0))
@@ -2060,9 +2120,9 @@ class MainWindow(Gtk.Window):
                 target = View.UPDATE
             elif self._panel == Panel.TIMER_SET:
                 target = View.TIMER_SET
-            elif self._panel == Panel.TIMER and self._timer.active:
-                target = View.TIMER_BIG
-            elif self._panel in (Panel.TIMER, Panel.PLAYER):
+            elif self._panel == Panel.TIMER:
+                target = View.TIMER_BIG if self._timer.active else View.TIMER_SET
+            elif self._panel == Panel.PLAYER:
                 target = View.MEDIA_BIG if self._media.has_track else View.IDLE_BIG
             else:
                 target = self._transient or (
@@ -2108,7 +2168,7 @@ class MainWindow(Gtk.Window):
     def get_settings_layout(self, ph: float) -> tuple[float, float]:
         row_y_start = 44.0
         avail_for_rows = ph - row_y_start - 12.0
-        row_h = max(24.0, min(36.0, avail_for_rows / 12.0))
+        row_h = max(24.0, min(36.0, avail_for_rows / 14.0))
         return row_y_start, row_h
 
     def get_look_layout(self, ph: float) -> tuple[float, float, float]:
@@ -2128,14 +2188,22 @@ class MainWindow(Gtk.Window):
 
     def size_of(self, view: View) -> Dims:
         d = SIZES[view]
+        if view == View.IDLE:
+            w = d.w
+            if Settings.weather and self._weather.has_weather:
+                w = 172.0
+            if Settings.privacy_indicators and (self._privacy.mic_active or self._privacy.camera_active):
+                extra = 18.0 if (self._privacy.mic_active and self._privacy.camera_active) else 10.0
+                w += extra
+            return d.with_w(w)
         if view == View.MEDIA:
             return d.with_w(self._media_width)
         if view == View.MEDIA_BIG and self._player_room:
             return d.with_h(PLAYER_HEIGHT + self._player_lyric_h)
         if view == View.SETTINGS:
             scale_val = max(0.01, self._size.value)
-            max_screen_h = (self.win_height - 60.0) / scale_val if self.win_height > 200 else 490.0
-            settings_h = max(360.0, min(490.0, max_screen_h))
+            max_screen_h = (self.win_height - 60.0) / scale_val if self.win_height > 200 else 530.0
+            settings_h = max(380.0, min(530.0, max_screen_h))
             return Dims(320.0, settings_h, 34)
         if view == View.LOOK:
             scale_val = max(0.01, self._size.value)
@@ -2423,6 +2491,10 @@ class MainWindow(Gtk.Window):
         moving |= self._digits_volume.tick(dt)
         moving |= self._digits_clock.tick(dt)
         moving |= self._digits_big_clock.tick(dt)
+        moving |= self._digits_weather.tick(dt)
+        moving |= self._privacy_mic_spring.advance(dt)
+        moving |= self._privacy_cam_spring.advance(dt)
+        moving |= self._weather_spring.advance(dt)
         moving |= self._digits_charge.tick(dt)
         moving |= self._digits_info_vol.tick(dt)
         moving |= self._digits_info_headset.tick(dt)
@@ -2787,6 +2859,31 @@ class MainWindow(Gtk.Window):
             self.notify(Glyph.Wifi if wifi else Glyph.Wired, COLOR_GREEN, title, "Wi-Fi подключён" if wifi else "Сеть подключена")
         else:
             self.notify(Glyph.Wifi if wifi else Glyph.Wired, COLOR_ORANGE, title, "Без доступа к интернету")
+
+    def on_privacy_changed(self, state: PrivacyState) -> None:
+        GLib.idle_add(self._apply_privacy_changed, state)
+
+    def _apply_privacy_changed(self, state: PrivacyState) -> bool:
+        if not self._ready:
+            return False
+        enabled = Settings.privacy_indicators
+        self._privacy_cam_spring.target = 1.0 if (enabled and state.camera_active) else 0.0
+        self._privacy_mic_spring.target = 1.0 if (enabled and state.mic_active) else 0.0
+        self.set_targets()
+        self.area.queue_draw()
+        return False
+
+    def on_weather_changed(self, info: WeatherInfo) -> None:
+        GLib.idle_add(self._apply_weather_changed, info)
+
+    def _apply_weather_changed(self, info: WeatherInfo) -> bool:
+        if not self._ready:
+            return False
+        self._digits_weather.set_text(info.temp_str)
+        self._weather_spring.target = 1.0 if Settings.weather else 0.0
+        self.set_targets()
+        self.area.queue_draw()
+        return False
 
     def _initial_media_sync(self, _data: object = None) -> bool:
         self.on_media_changed()
@@ -3267,8 +3364,7 @@ class MainWindow(Gtk.Window):
     def update_timer(self) -> None:
         if not self._timer.active:
             return
-        left = self._timer.left
-        if left <= 0.0:
+        if self._timer.tick():
             self.timer_done()
             return
 
@@ -3553,6 +3649,7 @@ class MainWindow(Gtk.Window):
         else:
             self.render_view(cr, self._current_view, pill_x, pill_y, w, h, alpha=1.0)
 
+        self.render_privacy_indicators(cr, pill_x, pill_y, w, h, alpha=1.0)
         cr.restore()
 
         if apart and bubble_rect and split > 0.3:
@@ -3680,16 +3777,97 @@ class MainWindow(Gtk.Window):
         elif view == View.UPDATE:
             self.render_update(cr, px, py, pw, ph, alpha)
 
+    def render_privacy_indicators(
+        self,
+        cr: cairo.Context,
+        px: float,
+        py: float,
+        pw: float,
+        ph: float,
+        alpha: float = 1.0,
+    ) -> None:
+        if not Settings.privacy_indicators:
+            return
+
+        cam_val = self._privacy_cam_spring.value
+        mic_val = self._privacy_mic_spring.value
+        if cam_val <= 0.01 and mic_val <= 0.01:
+            return
+
+        compact = ph < 45.0
+        cy = py + (ph / 2.0 if compact else 20.0)
+        r = 3.5
+        cur_x = px + pw - 12.0
+
+        if cam_val > 0.01:
+            eff_a = min(1.0, max(0.0, cam_val)) * alpha
+            cr.set_source_rgba(0.204, 0.78, 0.349, eff_a)
+            cr.arc(cur_x, cy, r, 0.0, 2.0 * math.pi)
+            cr.fill()
+            cur_x -= 10.0
+
+        if mic_val > 0.01:
+            eff_a = min(1.0, max(0.0, mic_val)) * alpha
+            cr.set_source_rgba(1.0, 0.584, 0.0, eff_a)
+            cr.arc(cur_x, cy, r, 0.0, 2.0 * math.pi)
+            cr.fill()
+
     def render_idle(self, cr: cairo.Context, px: float, py: float, pw: float, ph: float, alpha: float) -> None:
-        self._digits_clock.render(
-            cr,
-            px + pw / 2.0,
-            py + ph / 2.0,
-            font_size=13.5,
-            color=(1.0, 1.0, 1.0, alpha),
-            align="center",
-            valign="center",
-        )
+        weather_info = self._weather.current if (Settings.weather and self._weather.has_weather) else None
+
+        priv_extra = 0.0
+        if Settings.privacy_indicators and (self._privacy.mic_active or self._privacy.camera_active):
+            priv_extra = 18.0 if (self._privacy.mic_active and self._privacy.camera_active) else 10.0
+
+        avail_w = pw - priv_extra
+
+        if weather_info:
+            clock_cx = px + avail_w * 0.28
+            self._digits_clock.render(
+                cr,
+                clock_cx,
+                py + ph / 2.0,
+                font_size=13.0,
+                color=(1.0, 1.0, 1.0, alpha),
+                align="center",
+                valign="center",
+            )
+
+            cr.set_source_rgba(1.0, 1.0, 1.0, 0.3 * alpha)
+            cr.arc(px + avail_w * 0.52, py + ph / 2.0, 1.5, 0.0, 2.0 * math.pi)
+            cr.fill()
+
+            icon_size = 14.0
+            wx = px + avail_w * 0.60
+            render_icon(
+                cr,
+                weather_info.icon_glyph,
+                wx,
+                py + (ph - icon_size) / 2.0,
+                icon_size,
+                (0.9, 0.9, 0.95),
+                alpha=alpha,
+            )
+            self._digits_weather.set_text(weather_info.temp_str)
+            self._digits_weather.render(
+                cr,
+                wx + icon_size + 4.0,
+                py + ph / 2.0,
+                font_size=12.5,
+                color=(1.0, 1.0, 1.0, alpha),
+                align="left",
+                valign="center",
+            )
+        else:
+            self._digits_clock.render(
+                cr,
+                px + avail_w / 2.0,
+                py + ph / 2.0,
+                font_size=13.5,
+                color=(1.0, 1.0, 1.0, alpha),
+                align="center",
+                valign="center",
+            )
 
     def render_media(self, cr: cairo.Context, px: float, py: float, pw: float, ph: float, alpha: float) -> None:
         art_size = 22.0
@@ -3783,13 +3961,15 @@ class MainWindow(Gtk.Window):
                 )
 
     def render_timer(self, cr: cairo.Context, px: float, py: float, pw: float, ph: float, alpha: float) -> None:
+        pause_fade = (0.55 + 0.45 * math.sin(time.monotonic() * 4.0)) if self._timer.is_paused else 1.0
+        tint = (self._timer_tint[0] * pause_fade, self._timer_tint[1] * pause_fade, self._timer_tint[2] * pause_fade)
         Ring.render(
             cr,
             cx=px + 18.0,
             cy=py + ph / 2.0,
             radius=9.0,
             progress=self._timer.share,
-            color=self._timer_tint,
+            color=tint,
             thickness=2.5,
         )
         self._digits_timer.render(
@@ -3797,7 +3977,7 @@ class MainWindow(Gtk.Window):
             x=px + pw - 14.0,
             y=py + ph / 2.0,
             font_size=13.5,
-            color=self._timer_tint,
+            color=tint,
             align="right",
             valign="center",
         )
@@ -4335,10 +4515,16 @@ class MainWindow(Gtk.Window):
 
     def render_idle_big(self, cr: cairo.Context, px: float, py: float, pw: float, ph: float, alpha: float) -> None:
         self._digits_big_clock.render(cr, px + 26.0, py + 48.0, font_size=46.0, color=(1.0, 1.0, 1.0, alpha), align="left", valign="center")
-        draw_text(cr, self._clock_date_str, px + 28.0, py + 86.0, font_size=13.0, bold=False, color=COLOR_DIM[:3], alpha=alpha, align="left", valign="center")
+        draw_text(cr, self._clock_date_str, px + 28.0, py + 84.0, font_size=13.0, bold=False, color=COLOR_DIM[:3], alpha=alpha, align="left", valign="center")
         if self._quiet:
             date_w = measure_text(cr, self._clock_date_str, 13.0, bold=False)
-            render_icon(cr, Glyph.Moon, px + 28.0 + date_w + 6.0, py + 79.0, 13.0, COLOR_INDIGO, alpha=alpha)
+            render_icon(cr, Glyph.Moon, px + 28.0 + date_w + 6.0, py + 77.0, 13.0, COLOR_INDIGO, alpha=alpha)
+
+        weather_info = self._weather.current if (Settings.weather and self._weather.has_weather) else None
+        if weather_info:
+            weather_text = f"{weather_info.temp_str} · {weather_info.condition}"
+            render_icon(cr, weather_info.icon_glyph, px + 28.0, py + 99.0, 14.0, COLOR_DIM[:3], alpha=alpha)
+            draw_text(cr, weather_text, px + 47.0, py + 106.0, font_size=12.0, bold=False, color=COLOR_DIM[:3], alpha=alpha, align="left", valign="center")
 
         rx = px + pw - 24.0
         render_icon(cr, Glyph.Loud, rx - 54.0, py + 32.0, 16.0, COLOR_DIM[:3], alpha=alpha)
@@ -4475,6 +4661,9 @@ class MainWindow(Gtk.Window):
     def render_timer_big(self, cr: cairo.Context, px: float, py: float, pw: float, ph: float, alpha: float) -> None:
         p_cx = px + 36.0
         p_cy = py + ph / 2.0
+        self._timer_btn_toggle_rect = (p_cx - 24.0, p_cy - 24.0, 48.0, 48.0)
+
+        # Toggle circular button
         cr.new_sub_path()
         cr.arc(p_cx, p_cy, 21.0, 0, 2 * math.pi)
         cr.set_source_rgba(COLOR_ORANGE[0], COLOR_ORANGE[1], COLOR_ORANGE[2], 0.25 * alpha)
@@ -4483,16 +4672,18 @@ class MainWindow(Gtk.Window):
         if self._timer.total > 0:
             frac = self._timer.share
             cr.save()
-            cr.set_line_width(2.2)
+            cr.set_line_width(2.4)
             cr.set_line_cap(cairo.LINE_CAP_ROUND)
             cr.arc(p_cx, p_cy, 23.5, 0, 2 * math.pi)
             cr.set_source_rgba(COLOR_ORANGE[0], COLOR_ORANGE[1], COLOR_ORANGE[2], 0.15 * alpha)
             cr.stroke()
             if frac > 0.001:
+                pause_fade = (0.6 + 0.4 * math.sin(time.monotonic() * 4.0)) if self._timer.is_paused else 1.0
                 cr.arc(p_cx, p_cy, 23.5, -math.pi / 2.0, -math.pi / 2.0 + 2 * math.pi * frac)
-                cr.set_source_rgba(self._timer_tint[0], self._timer_tint[1], self._timer_tint[2], 0.9 * alpha)
+                cr.set_source_rgba(self._timer_tint[0], self._timer_tint[1], self._timer_tint[2], 0.9 * alpha * pause_fade)
                 cr.stroke()
             cr.restore()
+
         if self._timer.running:
             cr.rectangle(p_cx - 4.5, p_cy - 6.0, 3.0, 12.0)
             cr.rectangle(p_cx + 1.5, p_cy - 6.0, 3.0, 12.0)
@@ -4507,10 +4698,12 @@ class MainWindow(Gtk.Window):
             cr.set_source_rgba(COLOR_ORANGE[0], COLOR_ORANGE[1], COLOR_ORANGE[2], alpha)
             cr.fill()
 
+        # Stop button
         c_cx = px + 84.0
         c_cy = py + ph / 2.0
+        self._timer_btn_stop_rect = (c_cx - 20.0, c_cy - 20.0, 40.0, 40.0)
         cr.new_sub_path()
-        cr.arc(c_cx, c_cy, 21.0, 0, 2 * math.pi)
+        cr.arc(c_cx, c_cy, 20.0, 0, 2 * math.pi)
         cr.set_source_rgba(1.0, 1.0, 1.0, 0.14 * alpha)
         cr.fill()
 
@@ -4526,6 +4719,7 @@ class MainWindow(Gtk.Window):
         # Quick +1m chip
         b1_x = px + 118.0
         b1_y = py + (ph - 28.0) / 2.0
+        self._timer_btn_add1_rect = (b1_x, b1_y, 38.0, 28.0)
         draw_rounded_rect(cr, b1_x, b1_y, 38.0, 28.0, 14.0)
         cr.set_source_rgba(1.0, 1.0, 1.0, 0.12 * alpha)
         cr.fill_preserve()
@@ -4537,6 +4731,7 @@ class MainWindow(Gtk.Window):
         # Quick +5m chip
         b5_x = px + 162.0
         b5_y = py + (ph - 28.0) / 2.0
+        self._timer_btn_add5_rect = (b5_x, b5_y, 38.0, 28.0)
         draw_rounded_rect(cr, b5_x, b5_y, 38.0, 28.0, 14.0)
         cr.set_source_rgba(1.0, 1.0, 1.0, 0.12 * alpha)
         cr.fill_preserve()
@@ -4545,7 +4740,7 @@ class MainWindow(Gtk.Window):
         cr.stroke()
         draw_text(cr, "+5м", b5_x + 19.0, py + ph / 2.0, font_size=11.5, bold=True, color=COLOR_WHITE, alpha=alpha, align="center", valign="center")
 
-        status_prefix = "На паузе" if not self._timer.running else ("Завершается!" if self._timer.is_urgent else "Идёт отсчёт")
+        status_prefix = "На паузе" if self._timer.is_paused else ("Завершается!" if self._timer.is_urgent else "Идёт отсчёт")
         draw_text(cr, f"{status_prefix} · {format_time(self._timer.total)}", px + pw - 20.0, py + 25.0, font_size=11.5, color=self._timer_tint, alpha=0.85 * alpha, align="right", valign="center")
         if self._timer.active and self._digits_big_timer.text != self._timer.formatted:
             self._digits_big_timer.set_text(self._timer.formatted)
@@ -4553,12 +4748,30 @@ class MainWindow(Gtk.Window):
         self._digits_big_timer.render(cr, px + pw - 20.0, py + 60.0, font_size=digits_size, color=(self._timer_tint[0], self._timer_tint[1], self._timer_tint[2], alpha), align="right", valign="center")
 
     def render_timer_set(self, cr: cairo.Context, px: float, py: float, pw: float, ph: float, alpha: float) -> None:
-        draw_text(cr, "ТАЙМЕР", px + 22.0, py + 22.0, font_size=10.5, bold=True, color=COLOR_DIM[:3], alpha=0.6 * alpha, align="left", valign="center")
+        self._timer_set_back_rect = (px + 12.0, py + 10.0, 95.0, 26.0)
+        render_icon(cr, Glyph.Back, px + 20.0, py + 22.0, 10.0, COLOR_DIM[:3], alpha=0.7 * alpha)
+        draw_text(cr, "ТАЙМЕР", px + 36.0, py + 22.0, font_size=10.5, bold=True, color=COLOR_DIM[:3], alpha=0.7 * alpha, align="left", valign="center")
 
-        render_icon(cr, Glyph.Minus, px + 24.0, py + 48.0, 16.0, COLOR_WHITE, alpha=alpha)
+        m_cx = px + 36.0
+        m_cy = py + 54.0
+        self._timer_set_minus_rect = (m_cx - 18.0, m_cy - 18.0, 36.0, 36.0)
+        cr.new_sub_path()
+        cr.arc(m_cx, m_cy, 17.0, 0, 2 * math.pi)
+        cr.set_source_rgba(1.0, 1.0, 1.0, 0.10 * alpha)
+        cr.fill()
+        render_icon(cr, Glyph.Minus, m_cx - 8.0, m_cy - 8.0, 16.0, COLOR_WHITE, alpha=alpha)
+
         digits_size = 30.0 if self._minutes >= 60 else 38.0
         self._digits_setup.render(cr, px + pw / 2.0, py + 54.0, font_size=digits_size, color=COLOR_WHITE, align="center", valign="center")
-        render_icon(cr, Glyph.Plus, px + pw - 40.0, py + 48.0, 16.0, COLOR_WHITE, alpha=alpha)
+
+        p_cx = px + pw - 36.0
+        p_cy = py + 54.0
+        self._timer_set_plus_rect = (p_cx - 18.0, p_cy - 18.0, 36.0, 36.0)
+        cr.new_sub_path()
+        cr.arc(p_cx, p_cy, 17.0, 0, 2 * math.pi)
+        cr.set_source_rgba(1.0, 1.0, 1.0, 0.10 * alpha)
+        cr.fill()
+        render_icon(cr, Glyph.Plus, p_cx - 8.0, p_cy - 8.0, 16.0, COLOR_WHITE, alpha=alpha)
 
         if self._minutes >= 60:
             h = self._minutes // 60
@@ -4572,8 +4785,10 @@ class MainWindow(Gtk.Window):
         chip_y = py + 98.0
         chip_h = 28.0
         chip_w = (pw - 28.0) / len(presets)
+        self._timer_set_preset_rects = []
         for idx, (p_min, p_lbl) in enumerate(presets):
             cx_chip = px + 14.0 + idx * chip_w
+            self._timer_set_preset_rects.append((cx_chip, chip_y, chip_w, chip_h, p_min))
             is_active = (self._minutes == p_min)
             draw_rounded_rect(cr, cx_chip + 2.0, chip_y, chip_w - 4.0, chip_h, 14.0)
             if is_active:
@@ -4588,6 +4803,7 @@ class MainWindow(Gtk.Window):
             draw_text(cr, p_lbl, cx_chip + chip_w / 2.0, chip_y + chip_h / 2.0, font_size=11.5, bold=is_active, color=COLOR_WHITE, alpha=alpha, align="center", valign="center")
 
         start_y = py + 138.0
+        self._timer_set_start_rect = (px + 16.0, start_y, pw - 32.0, 36.0)
         draw_rounded_rect(cr, px + 16.0, start_y, pw - 32.0, 36.0, 14.0)
         cr.set_source_rgba(COLOR_ORANGE[0], COLOR_ORANGE[1], COLOR_ORANGE[2], alpha)
         cr.fill()
@@ -4637,6 +4853,8 @@ class MainWindow(Gtk.Window):
             (Glyph.Rim, "Ободок острова", "rim"),
             (Glyph.Mid, "Громкость приложения", "app_volume"),
             (Glyph.Wifi, "Уведомления о сети", "network"),
+            (Glyph.Mic, "Индикаторы приватности", "privacy_indicators"),
+            (Glyph.Sun, "Виджет погоды", "weather"),
             (Glyph.Expand, "Скрывать на полном экране", "hide_fullscreen"),
             (Glyph.Clock, "Задержка при анимации", "click_lock"),
             (Glyph.Linux, "Запускать при старте", "autostart"),

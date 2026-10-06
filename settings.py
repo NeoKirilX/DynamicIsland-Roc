@@ -297,6 +297,38 @@ class _SettingsMeta(type):
         cls.network = value
 
     @property
+    def privacy_indicators(cls) -> bool:
+        return cls._get_bool("privacy_indicators", True)
+
+    @privacy_indicators.setter
+    def privacy_indicators(cls, value: bool) -> None:
+        cls._set("privacy_indicators", bool(value))
+
+    @property
+    def PrivacyIndicators(cls) -> bool:
+        return cls.privacy_indicators
+
+    @PrivacyIndicators.setter
+    def PrivacyIndicators(cls, value: bool) -> None:
+        cls.privacy_indicators = value
+
+    @property
+    def weather(cls) -> bool:
+        return cls._get_bool("weather", True)
+
+    @weather.setter
+    def weather(cls, value: bool) -> None:
+        cls._set("weather", bool(value))
+
+    @property
+    def Weather(cls) -> bool:
+        return cls.weather
+
+    @Weather.setter
+    def Weather(cls, value: bool) -> None:
+        cls.weather = value
+
+    @property
     def hide_fullscreen(cls) -> bool:
         return cls._get_bool("hide_fullscreen", True)
 

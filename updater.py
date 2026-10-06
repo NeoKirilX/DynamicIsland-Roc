@@ -17,7 +17,7 @@ logger = logging.getLogger(__name__)
 
 REPO_OWNER = "NeoKirilX"
 REPO_NAME = "DynamicIsland-Roc"
-CURRENT_VERSION = "1.0.2"
+CURRENT_VERSION = "1.0.3"
 API_URL = f"https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/releases/latest"
 
 class UpdateState:
