@@ -42,6 +42,7 @@ class Goo:
         self._tint_start_color: tuple[float, float, float, float] = rim_color
         self._tint_duration: float = 0.0
         self._tint_elapsed: float = 0.0
+        self.rim_enabled: bool = True
 
         is_default = (rim_color == DEFAULT_RIM_COLOR)
         init_amount = 0.0 if is_default else 1.0
@@ -91,12 +92,29 @@ class Goo:
         else:
             self.bubble = (0.0, 0.0, 0.0, 0.0)
 
+    def set_rim_enabled(self, enabled: bool) -> None:
+        self.rim_enabled = bool(enabled)
+        if not self.rim_enabled:
+            self.rim_color = (0.0, 0.0, 0.0, 0.0)
+            self._target_rim_color = (0.0, 0.0, 0.0, 0.0)
+            self._tint_start_color = (0.0, 0.0, 0.0, 0.0)
+            self._tint_amount = 0.0
+            self._tint_amount_from = 0.0
+            self._tint_amount_to = 0.0
+        else:
+            if self.rim_color[3] <= 0.001:
+                self.rim_color = DEFAULT_RIM_COLOR
+                self._target_rim_color = DEFAULT_RIM_COLOR
+
     def tint(
         self,
         color: tuple[float, float, float] | None,
         duration_sec: float = 0.0,
     ) -> None:
-        if color is not None:
+        if not self.rim_enabled:
+            to_color = (0.0, 0.0, 0.0, 0.0)
+            target_amount = 0.0
+        elif color is not None:
             r, g, b = color
             r = r / 255.0 if r > 1.0 else float(r)
             g = g / 255.0 if g > 1.0 else float(g)
@@ -314,7 +332,7 @@ class Goo:
             self.rim_color = self._target_rim_color
             self._tint_amount = self._tint_amount_to
 
-        px, py, pw, ph, pr = self._shrunk_rect(self.pill, self.radius)
+        px, py, pw, ph, pr = self._shrunk_rect(self.pill, self.radius, notch_factor=self.notch_factor, rim_enabled=self.rim_enabled)
         bubble_empty = self._is_empty(self.bubble)
 
         if bubble_empty:
@@ -324,7 +342,7 @@ class Goo:
             return
 
         bx, by, bw, bh, br = self._shrunk_rect(
-            self.bubble, self.bubble[3] / 2.0
+            self.bubble, self.bubble[3] / 2.0, notch_factor=0.0, rim_enabled=self.rim_enabled
         )
         neck_info = self.neck()
         intersects = self._rects_intersect(self.pill, self.bubble)
@@ -347,10 +365,64 @@ class Goo:
             self._stroke_and_fill(cr)
             return
 
+        self._render_overlapping(cr, px, py, pw, ph, pr, bx, by, bw, bh, br)
+
+    def _render_overlapping(
+        self,
+        cr: cairo.Context,
+        px: float,
+        py: float,
+        pw: float,
+        ph: float,
+        pr: float,
+        bx: float,
+        by: float,
+        bw: float,
+        bh: float,
+        br: float,
+    ) -> None:
+        if bx >= px and bx + bw <= px + pw and by >= py and by + bh <= py + ph:
+            cr.new_path()
+            self._add_rounded_rect_path(cr, px, py, pw, ph, pr, notch_factor=self.notch_factor, ear_size=self.ear_size)
+            self._stroke_and_fill(cr)
+            return
+
         cr.new_path()
         self._add_rounded_rect_path(cr, px, py, pw, ph, pr, notch_factor=self.notch_factor, ear_size=self.ear_size)
+        path_pill = cr.copy_path()
+
+        cr.new_path()
         self._add_rounded_rect_path(cr, bx, by, bw, bh, br)
-        self._stroke_and_fill(cr)
+        path_bubble = cr.copy_path()
+
+        if self.rim_enabled and self.rim_color[3] > 0.001:
+            cr.new_path()
+            cr.append_path(path_pill)
+            cr.append_path(path_bubble)
+            cr.set_source_rgba(*self.rim_color)
+            cr.set_line_width(2.0 * RIM)
+            cr.set_line_join(cairo.LINE_JOIN_ROUND)
+            cr.stroke()
+
+        cr.new_path()
+        cr.append_path(path_pill)
+        cr.append_path(path_bubble)
+        cr.set_source_rgba(0.0, 0.0, 0.0, 1.0)
+        cr.fill()
+
+        glass_factor = max(0.0, min(1.0, self._glass_enabled))
+        if glass_factor > 0.001:
+            cr.save()
+            cr.new_path()
+            cr.append_path(path_pill)
+            cr.append_path(path_bubble)
+            cr.clip()
+            strength = max(0.0, min(1.0, self._liquid)) * (0.6 + 0.4 * self._glass) * glass_factor
+            tint = (self.rim_color[0], self.rim_color[1], self.rim_color[2])
+            amt = max(0.0, min(1.0, self._tint_amount)) * glass_factor
+            bounds = self._bounds()
+            self._paint_liquid(cr, strength, tint, amt, path_pill, bounds)
+            cr.restore()
 
     def _build_unified_path(
         self,
@@ -536,11 +608,12 @@ class Goo:
         if glass_factor <= 0.001:
             cr.set_source_rgba(0.0, 0.0, 0.0, 1.0)
             cr.fill()
-            cr.append_path(path)
-            cr.set_source_rgba(*self.rim_color)
-            cr.set_line_width(2.0 * RIM)
-            cr.set_line_join(cairo.LINE_JOIN_ROUND)
-            cr.stroke()
+            if self.rim_enabled and self.rim_color[3] > 0.001:
+                cr.append_path(path)
+                cr.set_source_rgba(*self.rim_color)
+                cr.set_line_width(2.0 * RIM)
+                cr.set_line_join(cairo.LINE_JOIN_ROUND)
+                cr.stroke()
             return
 
         liquid = self._liquid
@@ -564,6 +637,9 @@ class Goo:
         strength = max(0.0, min(1.0, liquid)) * (0.6 + 0.4 * self._glass) * glass_factor
         self._paint_liquid(cr, strength, tint, amt, path, bounds)
         cr.restore()
+
+        if not self.rim_enabled or self.rim_color[3] <= 0.001:
+            return
 
         cr.append_path(path)
         x0, y0, x1, y1 = bounds
@@ -614,14 +690,19 @@ class Goo:
     def _shrunk_rect(
         rect: tuple[float, float, float, float],
         radius: float,
+        notch_factor: float = 0.0,
+        rim_enabled: bool = True,
     ) -> tuple[float, float, float, float, float]:
         x, y, w, h = rect
+        if not rim_enabled:
+            return x, y, w, h, radius
         rx = min(RIM, w / 2.0)
         ry = min(RIM, h / 2.0)
+        nf = max(0.0, min(1.0, float(notch_factor)))
         sx = x + rx
-        sy = y + ry
+        sy = y + ry * (1.0 - nf)
         sw = max(0.0, w - 2.0 * rx)
-        sh = max(0.0, h - 2.0 * ry)
+        sh = max(0.0, h - ry * (2.0 - nf))
         sr = max(0.0, radius - RIM)
         sr = min(sr, sw / 2.0, sh / 2.0) if sw > 0.0 and sh > 0.0 else 0.0
         return sx, sy, sw, sh, sr
@@ -653,12 +734,14 @@ class Goo:
 
         ear_w = ear_size * nf
         ear_h = min(h * 0.45, ear_size * nf)
+        top_bleed = 4.0 * nf
+        top_y = y - top_bleed
 
         cr.new_sub_path()
-        cr.move_to(x - ear_w, y)
-        cr.line_to(x + w + ear_w, y)
+        cr.move_to(x - ear_w, top_y)
+        cr.line_to(x + w + ear_w, top_y)
         cr.curve_to(
-            x + w + ear_w * 0.45, y,
+            x + w + ear_w * 0.45, top_y,
             x + w, y + ear_h * 0.45,
             x + w, y + ear_h,
         )
@@ -669,8 +752,8 @@ class Goo:
         cr.line_to(x, y + ear_h)
         cr.curve_to(
             x, y + ear_h * 0.45,
-            x - ear_w * 0.45, y,
-            x - ear_w, y,
+            x - ear_w * 0.45, top_y,
+            x - ear_w, top_y,
         )
         cr.close_path()
 

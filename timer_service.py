@@ -53,9 +53,33 @@ class Countdown:
             secs = max(0, int(math.ceil(self.total)))
         else:
             secs = 0
-        minutes = secs // 60
+        hours = secs // 3600
+        minutes = (secs % 3600) // 60
         seconds = secs % 60
+        if hours > 0:
+            return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
         return f"{minutes:02d}:{seconds:02d}"
+
+    @property
+    def formatted_human(self) -> str:
+        if self.active:
+            secs = max(0, int(math.ceil(self.left)))
+        elif self._left > 0.0:
+            secs = max(0, int(math.ceil(self._left)))
+        elif self.total > 0.0:
+            secs = max(0, int(math.ceil(self.total)))
+        else:
+            secs = 0
+        hours = secs // 3600
+        minutes = (secs % 3600) // 60
+        s = secs % 60
+        if hours > 0 and minutes > 0:
+            return f"{hours} ч {minutes} мин"
+        elif hours > 0:
+            return f"{hours} ч"
+        elif minutes > 0:
+            return f"{minutes} мин"
+        return f"{s} с"
 
     def start(self, total_seconds: float) -> None:
         secs = max(0.0, float(total_seconds))
