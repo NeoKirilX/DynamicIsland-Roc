@@ -2756,7 +2756,7 @@ class MainWindow(Gtk.Window):
             for k in range(1, len(parts)):
                 if cls._normalize_phrase(parts[k]) == cls._normalize_phrase(parts[k - 1]):
                     run_len += 1
-                    if run_len >= 2:
+                    if run_len >= 3:
                         has_combo_run = True
                         break
                 else:
@@ -2817,6 +2817,7 @@ class MainWindow(Gtk.Window):
                 i += 1
 
         result: list[tuple[float, str]] = []
+        emitted_non_combo_lines: set[int] = set()
         i = 0
         while i < len(expanded):
             item = expanded[i]
@@ -2861,16 +2862,14 @@ class MainWindow(Gtk.Window):
 
                     if is_split and line_idx in lines_with_combos:
                         result.append((sub_t, sub_txt))
-                        k += 1
                     elif is_split:
-                        m = k
-                        while m < j and expanded[m][3] and expanded[m][5] == line_idx:
-                            m += 1
-                        result.append((sub_t, orig_txt))
-                        k = m
+                        if line_idx not in emitted_non_combo_lines:
+                            orig_start_t = raw_lines[line_idx][0]
+                            result.append((orig_start_t, orig_txt))
+                            emitted_non_combo_lines.add(line_idx)
                     else:
                         result.append((sub_t, orig_txt))
-                        k += 1
+                    k += 1
                 i = j
 
         return result
