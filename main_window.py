@@ -44,7 +44,7 @@ from equalizer import Equalizer
 from goo import Goo
 from headset import get_headset_charge
 from icon import Glyph, render_battery, render_icon
-from lyric import LyricLine, measure_text, render_wait, select_font
+from lyric import LyricLine, is_wordless, measure_text, render_wait, select_font
 from lyrics_service import LyricsService
 from media_service import MediaService, clean_track_title, format_display_title
 from native_wayland import is_ctrl_down, is_fullscreen, query_do_not_disturb
@@ -2774,7 +2774,7 @@ class MainWindow(Gtk.Window):
             return []
         expanded: list[tuple[float, str, float, bool, str, int]] = []
         for idx, (t, txt) in enumerate(raw_lines):
-            if not txt.strip():
+            if not txt.strip() or is_wordless(txt):
                 expanded.append((t, txt, 0.0, False, txt, idx))
                 continue
             parts = cls._split_phrase_line(txt)
@@ -2911,13 +2911,23 @@ class MainWindow(Gtk.Window):
                 return lines[index + 1][0]
             return max(self._media.duration, lines[index][0] + 4.0)
 
-        if current is not None and current[1].strip():
-            return (current[1], current[0], end_of(idx), at >= current[0])
+        if current is not None and current[1].strip() and not is_wordless(current[1]):
+            next_t = lines[idx + 1][0] if idx + 1 < len(lines) else max(self._media.duration, current[0] + 4.0)
+            gap = next_t - current[0]
+            if gap >= 6.0:
+                words = len(current[1].split())
+                sing_dur = max(2.5, min(5.0, words * 0.45 + 1.2))
+                line_end = current[0] + sing_dur
+                if at >= line_end:
+                    current = None
+            if current is not None:
+                end_t = min(next_t, current[0] + (sing_dur if gap >= 6.0 else gap))
+                return (current[1], current[0], end_t, at >= current[0])
 
         start = idx + 1 if idx >= 0 else 0
         for j in range(start, len(lines)):
             line_t, line_text = lines[j]
-            if line_text.strip() and line_t - at <= LYRIC_LOOKAHEAD:
+            if line_text.strip() and not is_wordless(line_text) and line_t - at <= LYRIC_LOOKAHEAD:
                 return (line_text, line_t, end_of(j), False)
 
         return None
@@ -3814,14 +3824,14 @@ class MainWindow(Gtk.Window):
     def player_lyric_rows(self) -> list[tuple[float, str, float, float, float]]:
         lines = self._lyrics.for_duration(self._media.duration)
         cached = self._player_rows_cache
-        if cached is not None and cached[0] is lines:
+        if cached is not None and cached[0] == lines:
             return cached[1]
 
         lyric_w = PLAYER_LYRIC_W
         rows: list[tuple[float, str, float, float, float]] = []
         top = 0.0
         for line_t, line_text in lines:
-            if line_text.strip():
+            if line_text.strip() and not is_wordless(line_text):
                 h_act = measure_text(_MEASURE_CR, line_text, lyric_w, player_lyric_font(), True)[1]
                 h_dim = measure_text(_MEASURE_CR, line_text, lyric_w, player_lyric_font(), False)[1]
             else:
@@ -3960,7 +3970,7 @@ class MainWindow(Gtk.Window):
                 if y + max(h_a, h_d) < top_limit or y > bottom_limit:
                     continue
 
-                if not line_text.strip():
+                if not line_text.strip() or is_wordless(line_text):
                     if i == active:
                         time_left = max(0.0, end_t - at)
                         gap_fade = 1.0 if time_left > 1.2 else max(0.0, time_left / 1.2)
