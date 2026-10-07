@@ -344,7 +344,7 @@ def main() -> int:
 
     redirect_output_to_log(args.verbose)
 
-    os.environ.setdefault("GSK_RENDERER", "gl")
+    os.environ.setdefault("GSK_RENDERER", "ngl")
     os.environ.setdefault("GTK_A11Y", "none")
 
     try:

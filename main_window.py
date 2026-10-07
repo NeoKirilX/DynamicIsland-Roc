@@ -517,6 +517,8 @@ class MainWindow(Gtk.Window):
         self._privacy_cam_spring = Spring(1.0 if (self._privacy.camera_active and Settings.privacy_indicators) else 0.0, 260.0, 24.0)
         self._weather_spring = Spring(1.0 if (Settings.weather and self._weather.has_weather) else 0.0, 220.0, 24.0)
         self._cache_feedback_until: float = 0.0
+        self._was_moving: bool = False
+        self._last_input_reg_time: float = 0.0
 
         self._preview_lines = [
             "Музыка и текст",
@@ -2211,8 +2213,8 @@ class MainWindow(Gtk.Window):
 
         to_dims = self.size_of(target)
         growing = (to_dims.w * to_dims.h) >= (from_dims.w * from_dims.h)
-        self._w.tune(300 if growing else 340, 22 if growing else 30)
-        self._h.tune(300 if growing else 340, 22 if growing else 30)
+        self._w.tune(330 if growing else 260, 22 if growing else 27)
+        self._h.tune(220 if growing else 400, 22 if growing else 33)
 
         self.set_targets()
         self.sync_spectrum()
@@ -2636,8 +2638,12 @@ class MainWindow(Gtk.Window):
         if moving or self._media.is_playing or self._timer.running or self._ringing:
             self.area.queue_draw()
 
-        if moving:
+        if not moving and self._was_moving:
             self.update_input_region()
+        elif moving and (now - self._last_input_reg_time > 0.07):
+            self._last_input_reg_time = now
+            self.update_input_region()
+        self._was_moving = moving
         return True
 
     def on_periodic_tick(self) -> bool:
