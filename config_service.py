@@ -85,7 +85,6 @@ class ConfigService:
             "combo_strip_brackets",
             "combo_min_word_len",
             # Features
-            "privacy_indicators",
             "weather",
             "system_stats",
             "hide_fullscreen",

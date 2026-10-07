@@ -94,7 +94,6 @@ from toggle import Toggle
 from line_bar import LineBar
 from skip import Skip
 from updater import Updater, UpdateState
-from privacy_service import PrivacyService, PrivacyState
 from weather_service import WeatherService, WeatherInfo
 from system_service import SystemService, SystemInfo
 from i18n import t, LANGUAGES, LANGUAGE_KEYS
@@ -470,7 +469,6 @@ class MainWindow(Gtk.Window):
         self._network = NetworkService(on_changed=self.on_network_changed)
         self._timer = Countdown()
         self._alarm = Alarm()
-        self._privacy = PrivacyService(on_changed=self.on_privacy_changed)
         self._weather = WeatherService(on_changed=self.on_weather_changed)
         self._system = SystemService()
 
@@ -513,8 +511,6 @@ class MainWindow(Gtk.Window):
         self._row_list_combo = RowList()
         self._update_scroll = Spring(0.0, 240.0, 28.0)
         self._notch = Spring(1.0 if Settings.notch else 0.0, 240.0, 22.0)
-        self._privacy_mic_spring = Spring(1.0 if (self._privacy.mic_active and Settings.privacy_indicators) else 0.0, 260.0, 24.0)
-        self._privacy_cam_spring = Spring(1.0 if (self._privacy.camera_active and Settings.privacy_indicators) else 0.0, 260.0, 24.0)
         self._weather_spring = Spring(1.0 if (Settings.weather and self._weather.has_weather) else 0.0, 220.0, 24.0)
         self._cache_feedback_until: float = 0.0
         self._was_moving: bool = False
@@ -542,7 +538,6 @@ class MainWindow(Gtk.Window):
             "rim": Toggle(Settings.rim),
             "app_volume": Toggle(Settings.app_volume),
             "network": Toggle(Settings.network),
-            "privacy_indicators": Toggle(Settings.privacy_indicators),
             "weather": Toggle(Settings.weather),
             "system_stats": Toggle(Settings.system_stats),
             "hide_fullscreen": Toggle(Settings.hide_fullscreen),
@@ -1580,7 +1575,6 @@ class MainWindow(Gtk.Window):
                 "rim",
                 "app_volume",
                 "network",
-                "privacy_indicators",
                 "weather",
                 "system_stats",
                 "hide_fullscreen",
@@ -1599,8 +1593,6 @@ class MainWindow(Gtk.Window):
                         self.sync_rim(snap=True)
                     elif key == "lyrics":
                         self.track_lyrics()
-                    elif key == "privacy_indicators":
-                        self._apply_privacy_changed(self._privacy.state)
                     elif key == "weather":
                         if self._weather.current:
                             self._apply_weather_changed(self._weather.current)
@@ -2266,12 +2258,7 @@ class MainWindow(Gtk.Window):
     def size_of(self, view: View) -> Dims:
         d = SIZES[view]
         if view == View.IDLE:
-            w = d.w
-            if Settings.weather and self._weather.has_weather:
-                w = 172.0
-            if Settings.privacy_indicators and (self._privacy.mic_active or self._privacy.camera_active):
-                extra = 18.0 if (self._privacy.mic_active and self._privacy.camera_active) else 10.0
-                w += extra
+            w = 172.0 if (Settings.weather and self._weather.has_weather) else d.w
             return d.with_w(w)
         if view == View.TIMER:
             timer_fmt = self._timer.formatted if self._timer.active else "25:00"
@@ -2605,8 +2592,6 @@ class MainWindow(Gtk.Window):
         moving |= self._digits_clock.tick(dt)
         moving |= self._digits_big_clock.tick(dt)
         moving |= self._digits_weather.tick(dt)
-        moving |= self._privacy_mic_spring.advance(dt)
-        moving |= self._privacy_cam_spring.advance(dt)
         moving |= self._weather_spring.advance(dt)
         moving |= self._digits_charge.tick(dt)
         moving |= self._digits_info_vol.tick(dt)
@@ -2978,19 +2963,6 @@ class MainWindow(Gtk.Window):
             self.notify(Glyph.Wifi if wifi else Glyph.Wired, COLOR_GREEN, title, "Wi-Fi подключён" if wifi else "Сеть подключена")
         else:
             self.notify(Glyph.Wifi if wifi else Glyph.Wired, COLOR_ORANGE, title, "Без доступа к интернету")
-
-    def on_privacy_changed(self, state: PrivacyState) -> None:
-        GLib.idle_add(self._apply_privacy_changed, state)
-
-    def _apply_privacy_changed(self, state: PrivacyState) -> bool:
-        if not self._ready:
-            return False
-        enabled = Settings.privacy_indicators
-        self._privacy_cam_spring.target = 1.0 if (enabled and state.camera_active) else 0.0
-        self._privacy_mic_spring.target = 1.0 if (enabled and state.mic_active) else 0.0
-        self.set_targets()
-        self.area.queue_draw()
-        return False
 
     def on_weather_changed(self, info: WeatherInfo) -> None:
         GLib.idle_add(self._apply_weather_changed, info)
@@ -3852,7 +3824,6 @@ class MainWindow(Gtk.Window):
         else:
             self.render_view(cr, self._current_view, pill_x, pill_y, w, h, alpha=1.0)
 
-        self.render_privacy_indicators(cr, pill_x, pill_y, w, h, alpha=1.0)
         cr.restore()
 
         if apart and bubble_rect and split > 0.3:
@@ -3980,49 +3951,9 @@ class MainWindow(Gtk.Window):
         elif view == View.UPDATE:
             self.render_update(cr, px, py, pw, ph, alpha)
 
-    def render_privacy_indicators(
-        self,
-        cr: cairo.Context,
-        px: float,
-        py: float,
-        pw: float,
-        ph: float,
-        alpha: float = 1.0,
-    ) -> None:
-        if not Settings.privacy_indicators:
-            return
-
-        cam_val = self._privacy_cam_spring.value
-        mic_val = self._privacy_mic_spring.value
-        if cam_val <= 0.01 and mic_val <= 0.01:
-            return
-
-        compact = ph < 45.0
-        cy = py + (ph / 2.0 if compact else 20.0)
-        r = 3.5
-        cur_x = px + pw - 12.0
-
-        if cam_val > 0.01:
-            eff_a = min(1.0, max(0.0, cam_val)) * alpha
-            cr.set_source_rgba(0.204, 0.78, 0.349, eff_a)
-            cr.arc(cur_x, cy, r, 0.0, 2.0 * math.pi)
-            cr.fill()
-            cur_x -= 10.0
-
-        if mic_val > 0.01:
-            eff_a = min(1.0, max(0.0, mic_val)) * alpha
-            cr.set_source_rgba(1.0, 0.584, 0.0, eff_a)
-            cr.arc(cur_x, cy, r, 0.0, 2.0 * math.pi)
-            cr.fill()
-
     def render_idle(self, cr: cairo.Context, px: float, py: float, pw: float, ph: float, alpha: float) -> None:
         weather_info = self._weather.current if (Settings.weather and self._weather.has_weather) else None
-
-        priv_extra = 0.0
-        if Settings.privacy_indicators and (self._privacy.mic_active or self._privacy.camera_active):
-            priv_extra = 18.0 if (self._privacy.mic_active and self._privacy.camera_active) else 10.0
-
-        avail_w = pw - priv_extra
+        avail_w = pw
 
         if weather_info:
             clock_cx = px + avail_w * 0.28
@@ -5051,7 +4982,6 @@ class MainWindow(Gtk.Window):
             (Glyph.Rim, t("rim"), "rim"),
             (Glyph.Mid, t("app_volume"), "app_volume"),
             (Glyph.Wifi, t("network"), "network"),
-            (Glyph.Mic, t("privacy_indicators"), "privacy_indicators"),
             (Glyph.Sun, t("weather"), "weather"),
             (Glyph.Cpu, t("system_stats"), "system_stats"),
             (Glyph.Expand, t("hide_fullscreen"), "hide_fullscreen"),

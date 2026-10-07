@@ -78,10 +78,6 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "ru": "Уведомления о сети", "en": "Network alerts", "es": "Alertas de red", "de": "Netzwerkbenachrichtigungen",
         "fr": "Alertes réseau", "it": "Avvisi di rete", "pt": "Alertas de rede", "zh": "网络状态提示", "ja": "ネットワーク通知", "uk": "Сповіщення про мережу"
     },
-    "privacy_indicators": {
-        "ru": "Индикаторы приватности", "en": "Privacy indicators", "es": "Indicadores de privacidad", "de": "Datenschutzanzeigen",
-        "fr": "Indicateurs de confidentialité", "it": "Indicatori di privacy", "pt": "Indicadores de privacidade", "zh": "隐私指示灯", "ja": "プライバシーインジケーター", "uk": "Індикатори приватності"
-    },
     "weather": {
         "ru": "Виджет погоды", "en": "Weather widget", "es": "Widget de clima", "de": "Wetter-Widget",
         "fr": "Widget météo", "it": "Widget meteo", "pt": "Widget de clima", "zh": "天气小部件", "ja": "天気ウィジェット", "uk": "Віджет погоди"
