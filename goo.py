@@ -601,6 +601,86 @@ class Goo:
             cr.set_line_width(2.0)
             cr.stroke()
 
+    def _paint_matte_md3(
+        self,
+        cr: cairo.Context,
+        weight: float,
+        tint: tuple[float, float, float],
+        tint_amount: float,
+        path: cairo.Path | None,
+        bounds: tuple[float, float, float, float],
+    ) -> None:
+        x0, y0, x1, y1 = bounds
+        w = max(1.0, x1 - x0)
+        h = max(1.0, y1 - y0)
+
+        cr_r, cr_g, cr_b = _chroma(tint[0], tint[1], tint[2])
+        amt = max(0.0, min(1.0, tint_amount))
+        glass_lvl = self._glass
+
+        # 1. Base MD3 Surface Container (Dark Tonal Elevation)
+        base_alpha = max(0.65, min(0.94, 0.76 + 0.14 * (1.0 - glass_lvl))) * weight
+
+        body = cairo.LinearGradient(0.0, y0, 0.0, y1)
+        body.add_color_stop_rgba(
+            0.0,
+            0.090 + 0.075 * cr_r * amt,
+            0.095 + 0.075 * cr_g * amt,
+            0.120 + 0.075 * cr_b * amt,
+            base_alpha,
+        )
+        body.add_color_stop_rgba(
+            0.50,
+            0.065 + 0.055 * cr_r * amt,
+            0.070 + 0.055 * cr_g * amt,
+            0.085 + 0.055 * cr_b * amt,
+            base_alpha,
+        )
+        body.add_color_stop_rgba(
+            1.0,
+            0.045 + 0.035 * cr_r * amt,
+            0.048 + 0.035 * cr_g * amt,
+            0.060 + 0.035 * cr_b * amt,
+            base_alpha,
+        )
+        cr.set_source(body)
+        cr.rectangle(x0, y0, w, h)
+        cr.fill()
+
+        # 2. Ambient Diffuse Scattering (Soft velvet frosted light)
+        diffuse = cairo.LinearGradient(0.0, y0, 0.0, y0 + h * 0.70)
+        diffuse.add_color_stop_rgba(0.0, 1.0, 1.0, 1.0, 0.11 * glass_lvl * weight)
+        diffuse.add_color_stop_rgba(0.35, 1.0, 1.0, 1.0, 0.035 * glass_lvl * weight)
+        diffuse.add_color_stop_rgba(1.0, 1.0, 1.0, 1.0, 0.0)
+        cr.set_source(diffuse)
+        cr.rectangle(x0, y0, w, h)
+        cr.fill()
+
+        # 3. Dynamic Color Accent Bloom (Material You Tonal Glow)
+        if amt > 0.001:
+            bloom = cairo.RadialGradient(x0 + w * 0.5, y1, 0.0, x0 + w * 0.5, y1, max(w * 0.7, h * 1.5))
+            bloom.add_color_stop_rgba(0.0, cr_r, cr_g, cr_b, 0.16 * amt * weight)
+            bloom.add_color_stop_rgba(0.55, cr_r, cr_g, cr_b, 0.04 * amt * weight)
+            bloom.add_color_stop_rgba(1.0, cr_r, cr_g, cr_b, 0.0)
+            cr.set_source(bloom)
+            cr.rectangle(x0, y0, w, h)
+            cr.fill()
+
+        # 4. MD3 Hairline Bevel / Frosted Perimeter Edge
+        if path is not None:
+            cr.append_path(path)
+            edge = cairo.LinearGradient(0.0, y0, 0.0, y1)
+            edge.add_color_stop_rgba(0.0, 1.0, 1.0, 1.0, 0.22 * weight)
+            edge.add_color_stop_rgba(0.30, 1.0, 1.0, 1.0, 0.06 * weight)
+            if amt > 0.001:
+                edge.add_color_stop_rgba(0.75, cr_r, cr_g, cr_b, 0.08 * amt * weight)
+                edge.add_color_stop_rgba(1.0, cr_r, cr_g, cr_b, 0.20 * amt * weight)
+            else:
+                edge.add_color_stop_rgba(1.0, 1.0, 1.0, 1.0, 0.03 * weight)
+            cr.set_source(edge)
+            cr.set_line_width(1.0)
+            cr.stroke()
+
     def _stroke_and_fill(self, cr: cairo.Context) -> None:
         path = cr.copy_path()
         glass_factor = max(0.0, min(1.0, self._glass_enabled))
@@ -634,8 +714,16 @@ class Goo:
 
         cr.save()
         cr.clip()
-        strength = max(0.0, min(1.0, liquid)) * (0.6 + 0.4 * self._glass) * glass_factor
-        self._paint_liquid(cr, strength, tint, amt, path, bounds)
+        matte_weight = (1.0 - liquid) * glass_factor
+        liquid_weight = liquid * glass_factor
+
+        if matte_weight > 0.001:
+            self._paint_matte_md3(cr, matte_weight, tint, amt, path, bounds)
+
+        if liquid_weight > 0.001:
+            liquid_strength = liquid_weight * (0.6 + 0.4 * self._glass)
+            self._paint_liquid(cr, liquid_strength, tint, amt, path, bounds)
+
         cr.restore()
 
         if not self.rim_enabled or self.rim_color[3] <= 0.001:

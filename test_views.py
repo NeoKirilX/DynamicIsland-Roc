@@ -48,7 +48,10 @@ def test_views():
         "Combo",
         "Shelf",
         "Update",
+        "Equalizer",
     ]
+
+    original_settings = dict(Settings._data)
 
     def on_activate(application):
         for view_name in views_to_test:
@@ -144,12 +147,87 @@ def test_views():
         assert win._current_view == View.UPDATE
         print("  Panel.UPDATE opened successfully ->", win._current_view)
 
+        win.open_panel(Panel.EQUALIZER)
+        win.update_view()
+        assert win._panel == Panel.EQUALIZER
+        assert win._current_view == View.EQUALIZER
+        print("  Panel.EQUALIZER opened successfully ->", win._current_view)
+
+        # Test equalizer toggles & dragging
+        assert "compact_equalizer" in win._toggles
+        assert "mini_equalizer" in win._toggles
+        win._toggles["compact_equalizer"].set_state(True)
+        assert win._toggles["compact_equalizer"].on is True
+        win._toggles["compact_equalizer"].set_drag_fraction(0.2)
+        assert abs(win._toggles["compact_equalizer"].progress - 0.2) < 1e-3
+        win._toggles["compact_equalizer"].set_drag_fraction(0.85)
+        assert abs(win._toggles["compact_equalizer"].progress - 0.85) < 1e-3
+        win._apply_toggle_state("compact_equalizer", True)
+        assert Settings.compact_equalizer is True
+        win._apply_toggle_state("compact_equalizer", False)
+        assert Settings.compact_equalizer is False
+
+        # Test matrix fade strength setting and scrolling
+        Settings.matrix_fade_strength = 70
+        assert Settings.matrix_fade_strength == 70
+        assert Settings.matrix_fade is True
+        Settings.matrix_fade_strength = 0
+        assert Settings.matrix_fade is False
+        Settings.matrix_fade_strength = 50
+
+        # Test slider module integration
+        from slider import SLIDERS
+        expected_keys = [
+            "scale", "pos_y", "pos_x", "radius", "height", "text_scale", "glass",
+            "lyric_anim_speed", "lyric_anim_height", "lyric_anim_stagger", "lyric_lead_sec",
+            "combo_min_repeats", "combo_min_word_len",
+            "compact_eq_bars", "eq_bars", "eq_sensitivity", "matrix_rows", "matrix_fade_strength", "matrix_opacity",
+        ]
+        for k in expected_keys:
+            assert k in SLIDERS, f"Slider key missing: {k}"
+
+        assert SLIDERS["scale"].get_min() == 75.0
+        assert SLIDERS["scale"].get_max() == 130.0
+        assert SLIDERS["text_scale"].get_min() == 75.0
+        assert SLIDERS["text_scale"].get_max() == 130.0
+        assert SLIDERS["height"].get_min() == 0.0
+        assert SLIDERS["height"].get_max() == 16.0
+        assert SLIDERS["lyric_anim_height"].get_min() == 15.0
+        assert SLIDERS["lyric_anim_height"].get_max() == 80.0
+        assert SLIDERS["lyric_lead_sec"].get_min() == 0.0
+        assert SLIDERS["lyric_lead_sec"].get_max() == 9.0
+        assert SLIDERS["lyric_lead_sec"].format_val(0) == "Выкл"
+        assert SLIDERS["lyric_lead_sec"].format_val(5) == "5 сек"
+
+        # Test dynamic screen limits
+        assert SLIDERS["pos_x"].get_min(win) <= -300
+        assert SLIDERS["pos_x"].get_max(win) >= 300
+        assert SLIDERS["pos_y"].get_max(win) >= 200
+
+        # Test interactive on_down / on_move / on_up & apply_step
+        SLIDERS["scale"].on_down(0, 0, 100, win)
+        SLIDERS["scale"].on_up(win)
+        assert Settings.scale == 75
+        SLIDERS["scale"].on_down(100, 0, 100, win)
+        SLIDERS["scale"].on_up(win)
+        assert Settings.scale == 130
+        SLIDERS["scale"].apply_step(-10, win)
+        assert Settings.scale == 120
+
+        # Test cairo slider rendering
+        surf = cairo.ImageSurface(cairo.FORMAT_ARGB32, 200, 40)
+        cr_test = cairo.Context(surf)
+        SLIDERS["scale"].render(cr_test, 10, 10, 80, 24, (1.0, 0.5, 0.0), 1.0)
+        print("  All 19 modular sliders verified successfully!")
+
         win.start_timer(60.0)
         assert win._timer.active
         assert win._timer.running
         print("  Timer started (60s):", win._timer.formatted)
 
         win.destroy()
+        Settings._data = dict(original_settings)
+        Settings.save_now()
         print("\nAll interactive state transition tests PASSED!")
         application.quit()
 

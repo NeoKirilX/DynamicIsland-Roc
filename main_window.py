@@ -82,6 +82,10 @@ from settings import (
     PLAYER_BG_MATRIX,
     PLAYER_BG_STARS,
     PLAYER_BG_BOTH,
+    DENSITIES,
+    DENSITY_SPARSE,
+    DENSITY_STANDARD,
+    DENSITY_DENSE,
     format_combo_badge,
     Settings,
 )
@@ -100,6 +104,7 @@ from i18n import t, LANGUAGES, LANGUAGE_KEYS
 from config_service import ConfigService, EXPORTS_DIR
 from starfield import StarField
 from dotmatrix import DotMatrix
+from slider import SLIDERS, SLIDER_WIDTH, SLIDER_HEIGHT, get_slider_layout
 
 try:
     from PIL import Image
@@ -126,6 +131,7 @@ class View(Enum):
     COMBO = auto()
     SHELF = auto()
     UPDATE = auto()
+    EQUALIZER = auto()
 
 class Panel(Enum):
     NONE = auto()
@@ -139,6 +145,7 @@ class Panel(Enum):
     COMBO = auto()
     SHELF = auto()
     UPDATE = auto()
+    EQUALIZER = auto()
 
 class Dims:
     __slots__ = ("w", "h", "r")
@@ -182,6 +189,7 @@ SIZES: dict[View, Dims] = {
     View.COMBO: Dims(320, 440, 34),
     View.SHELF: Dims(380, 136, 34),
     View.UPDATE: Dims(340, 230, 34),
+    View.EQUALIZER: Dims(320, 480, 34),
 }
 
 SCALES: list[int] = [85, 100, 115, 130]
@@ -398,6 +406,12 @@ def load_cairo_image(path: Optional[str]) -> Optional[cairo.ImageSurface]:
         return _IMAGE_SURFACE_CACHE[path][0]
     try:
         pil_img = Image.open(path).convert("RGBA")
+        if pil_img.width != pil_img.height:
+            min_dim = min(pil_img.width, pil_img.height)
+            left = (pil_img.width - min_dim) // 2
+            top = (pil_img.height - min_dim) // 2
+            pil_img = pil_img.crop((left, top, left + min_dim, top + min_dim))
+
         raw = bytearray(pil_img.tobytes("raw", "BGRA"))
         stride = cairo.ImageSurface.format_stride_for_width(cairo.FORMAT_ARGB32, pil_img.width)
         surf = cairo.ImageSurface.create_for_data(raw, cairo.FORMAT_ARGB32, pil_img.width, pil_img.height, stride)
@@ -509,6 +523,7 @@ class MainWindow(Gtk.Window):
         self._row_list_look = RowList()
         self._row_list_text_anim = RowList()
         self._row_list_combo = RowList()
+        self._row_list_equalizer = RowList()
         self._update_scroll = Spring(0.0, 240.0, 28.0)
         self._notch = Spring(1.0 if Settings.notch else 0.0, 240.0, 22.0)
         self._weather_spring = Spring(1.0 if (Settings.weather and self._weather.has_weather) else 0.0, 220.0, 24.0)
@@ -547,11 +562,15 @@ class MainWindow(Gtk.Window):
             "combo_enabled": Toggle(Settings.combo_enabled),
             "combo_ignore_adlibs": Toggle(Settings.combo_ignore_adlibs),
             "combo_strip_brackets": Toggle(Settings.combo_strip_brackets),
+            "compact_equalizer": Toggle(Settings.compact_equalizer),
+            "mini_equalizer": Toggle(Settings.mini_equalizer),
         }
 
+        init_r = 17.0 * float(Settings.radius) / 100.0
+        init_h = 34.0 + float(Settings.height)
         self._w = Spring(34.0)
-        self._h = Spring(34.0)
-        self._r = Spring(17.0)
+        self._h = Spring(init_h)
+        self._r = Spring(init_r)
         self._scale = Spring(1.0)
         self._offset = Spring(-50.0)
         self._seek_x = Spring(0.0)
@@ -612,6 +631,8 @@ class MainWindow(Gtk.Window):
         self._timer_set_start_rect: tuple[float, float, float, float] = (0.0, 0.0, 0.0, 0.0)
 
         self._dragging_look: bool = False
+        self._dragging_slider: Optional[str] = None
+        self._dragging_toggle: Optional[tuple[str, float, float, bool]] = None
         self._drag_start_x: float = 0.0
         self._drag_start_y: float = 0.0
         self._drag_orig_pos_x: int = 0
@@ -755,7 +776,10 @@ class MainWindow(Gtk.Window):
         self._ready = True
         GLib.idle_add(self._initial_media_sync, None)
 
+        self._goo.set_mode(Settings.material, 0.0)
         self._goo.set_glass(Settings.glass / 100.0)
+        self._eq_big.bars = Settings.eq_bars
+        self._eq_small.bars = Settings.compact_eq_bars
         self.update_clock()
         self.sync_accent()
         self.sync_rim(snap=True)
@@ -1088,14 +1112,17 @@ class MainWindow(Gtk.Window):
                 way = int(math.copysign(1, leant))
 
             if way != 0 and self.media_active:
-                if way > 0:
-                    self.skipped(1)
-                    self._skip_next.play()
-                    self._media.next()
-                else:
-                    self.skipped(-1)
-                    self._skip_prev.play()
-                    self._media.previous()
+                now = time.monotonic()
+                if now - getattr(self, "_last_skip_time", 0.0) >= 0.18:
+                    self._last_skip_time = now
+                    if way > 0:
+                        self.skipped(1)
+                        self._skip_next.play()
+                        self._media.next()
+                    else:
+                        self.skipped(-1)
+                        self._skip_prev.play()
+                        self._media.previous()
             self.set_targets()
             return
 
@@ -1143,9 +1170,28 @@ class MainWindow(Gtk.Window):
         self._hover = False
         self._bubble_hover = False
         self._bubble_pressed = False
+        if self._dragging_slider:
+            slider = SLIDERS.get(self._dragging_slider)
+            if slider:
+                slider.on_up(self)
+            self._dragging_slider = None
+        if self._dragging_toggle:
+            key, _, _, did_drag = self._dragging_toggle
+            self._dragging_toggle = None
+            if key in self._toggles:
+                self._toggles[key].set_pressed(False)
+                if did_drag:
+                    target_on = self._toggles[key].progress >= 0.5
+                    self._apply_toggle_state(key, target_on)
+                else:
+                    cur = getattr(Settings, key, False)
+                    self._toggles[key].set_state(cur, animate=True)
         self._row_list_menu.clear_hover()
         self._row_list_settings.clear_hover()
         self._row_list_look.clear_hover()
+        self._row_list_text_anim.clear_hover()
+        self._row_list_combo.clear_hover()
+        self._row_list_equalizer.clear_hover()
         if self._grab != "none":
             self._cancel_grab()
         else:
@@ -1157,6 +1203,62 @@ class MainWindow(Gtk.Window):
     def on_mouse_motion(self, controller: Gtk.EventControllerMotion, x: float, y: float) -> None:
         self._mouse_x = x
         self._mouse_y = y
+
+        if self._dragging_toggle:
+            state = 0
+            if hasattr(controller, "get_current_event_state"):
+                try:
+                    state = int(controller.get_current_event_state())
+                except Exception:
+                    pass
+            if state and not (state & Gdk.ModifierType.BUTTON1_MASK):
+                key, _, _, did_drag = self._dragging_toggle
+                self._dragging_toggle = None
+                if key in self._toggles:
+                    self._toggles[key].set_pressed(False)
+                    if did_drag:
+                        target_on = self._toggles[key].progress >= 0.5
+                        self._apply_toggle_state(key, target_on)
+                    else:
+                        cur = getattr(Settings, key, False)
+                        self._apply_toggle_state(key, not cur)
+                self._pressed = False
+                self.set_targets()
+                return
+
+            key, start_x, start_prog, did_drag = self._dragging_toggle
+            dx = x - start_x
+            if abs(dx) >= 3.0:
+                did_drag = True
+            if did_drag:
+                new_prog = max(0.0, min(1.0, start_prog + dx / 24.0))
+                if key in self._toggles:
+                    self._toggles[key].set_drag_fraction(new_prog)
+                self._dragging_toggle = (key, start_x, start_prog, True)
+                self.area.queue_draw()
+            return
+
+        if self._dragging_slider:
+            state = 0
+            if hasattr(controller, "get_current_event_state"):
+                try:
+                    state = int(controller.get_current_event_state())
+                except Exception:
+                    pass
+            if state and not (state & Gdk.ModifierType.BUTTON1_MASK):
+                slider = SLIDERS.get(self._dragging_slider)
+                if slider:
+                    slider.on_up(self)
+                self._dragging_slider = None
+                self._pressed = False
+                self.set_targets()
+                Settings.save_now()
+                return
+
+            lx, ly = self._screen_to_local(x, y)
+            px, py, pw, ph, _, _ = self._get_pill_and_bubble_rects()
+            self._apply_slider_drag(self._dragging_slider, lx, px, pw)
+            return
 
         if self._grab != "none" or self._pressed or self._dragging_look:
             state = 0
@@ -1295,6 +1397,20 @@ class MainWindow(Gtk.Window):
                 self._row_list_combo.clear_hover()
             self.area.queue_draw()
 
+        elif self._current_view == View.EQUALIZER:
+            row_y_start = 44.0
+            row_h = 35.0
+            hovered = None
+            for idx in range(12):
+                ry = py + row_y_start + idx * row_h
+                if px + 10 <= lx <= px + pw - 10 and ry <= ly < ry + row_h:
+                    hovered = idx
+                    self._row_list_equalizer.move_to(ry, row_h, idx)
+                    break
+            if hovered is None:
+                self._row_list_equalizer.clear_hover()
+            self.area.queue_draw()
+
         elif self._current_view == View.SHELF:
             strip_x = px + 18.0
             strip_y = py + 42.0
@@ -1369,8 +1485,52 @@ class MainWindow(Gtk.Window):
                 self._row_list_menu.set_pressed(True)
             elif self._current_view == View.SETTINGS:
                 self._row_list_settings.set_pressed(True)
+                row_y_start, row_h = self.get_settings_layout(ph)
+                if px + 8.0 <= lx <= px + 160.0 and py + 8.0 <= ly <= py + 42.0:
+                    self._pressed = True
+                    self.set_targets()
+                    return
+                setting_keys = [
+                    "lyrics",
+                    "lyric_effects",
+                    "rim",
+                    "app_volume",
+                    "network",
+                    "weather",
+                    "system_stats",
+                    "hide_fullscreen",
+                    "click_lock",
+                    "autostart",
+                    "capitalize_title",
+                ]
+                if px <= lx <= px + pw and ly >= py + row_y_start:
+                    row_idx = int((ly - (py + row_y_start)) / row_h)
+                    if 0 <= row_idx < len(setting_keys):
+                        key = setting_keys[row_idx]
+                        if key in self._toggles:
+                            self._dragging_toggle = (key, x, self._toggles[key].progress, False)
+                            self._toggles[key].set_pressed(True)
             elif self._current_view == View.LOOK:
                 self._row_list_look.set_pressed(True)
+                row_y_start, row_h, swatch_y = self.get_look_layout(ph)
+                if px + 8.0 <= lx <= px + 160.0 and py + 8.0 <= ly <= py + 42.0:
+                    self._pressed = True
+                    self.set_targets()
+                    return
+                slider_keys = {0: "scale", 1: "pos_y", 2: "pos_x", 6: "radius", 7: "height", 8: "text_scale", 10: "glass"}
+                track_x, track_w = get_slider_layout(px, pw)
+                if px <= lx <= px + pw and ly >= py + row_y_start:
+                    row_idx = int((ly - (py + row_y_start)) / row_h)
+                    if row_idx in slider_keys and lx >= track_x - 14.0 and lx <= px + pw - 10.0:
+                        slider_key = slider_keys[row_idx]
+                        self._dragging_slider = slider_key
+                        slider = SLIDERS[slider_key]
+                        slider.on_down(lx, track_x, track_w, self)
+                        play_sound("click")
+                        self.area.queue_draw()
+                        self._pressed = True
+                        self.set_targets()
+                        return
                 self._dragging_look = True
                 self._drag_start_x = x
                 self._drag_start_y = y
@@ -1378,8 +1538,96 @@ class MainWindow(Gtk.Window):
                 self._drag_orig_pos_y = Settings.pos_y
             elif self._current_view == View.TEXT_ANIM:
                 self._row_list_text_anim.set_pressed(True)
+                row_y_start = 108.0
+                row_h = 42.0
+                if px + 8.0 <= lx <= px + 160.0 and py + 8.0 <= ly <= py + 42.0:
+                    self._pressed = True
+                    self.set_targets()
+                    return
+                slider_keys = {1: "lyric_anim_speed", 2: "lyric_anim_height", 3: "lyric_anim_stagger", 4: "lyric_lead_sec"}
+                track_x, track_w = get_slider_layout(px, pw)
+                if px <= lx <= px + pw and ly >= py + row_y_start:
+                    row_idx = int((ly - (py + row_y_start)) / row_h)
+                    if row_idx in slider_keys and lx >= track_x - 14.0 and lx <= px + pw - 10.0:
+                        slider_key = slider_keys[row_idx]
+                        self._dragging_slider = slider_key
+                        slider = SLIDERS[slider_key]
+                        slider.on_down(lx, track_x, track_w, self)
+                        play_sound("click")
+                        self.area.queue_draw()
+                        self._pressed = True
+                        self.set_targets()
+                        return
             elif self._current_view == View.COMBO:
                 self._row_list_combo.set_pressed(True)
+                row_y_start = 104.0
+                row_h = 42.0
+                if px + 8.0 <= lx <= px + 160.0 and py + 8.0 <= ly <= py + 42.0:
+                    self._pressed = True
+                    self.set_targets()
+                    return
+                slider_keys = {1: "combo_min_repeats", 6: "combo_min_word_len"}
+                track_x, track_w = get_slider_layout(px, pw)
+                if px <= lx <= px + pw and ly >= py + row_y_start:
+                    row_idx = int((ly - (py + row_y_start)) / row_h)
+                    if row_idx in slider_keys and lx >= track_x - 14.0 and lx <= px + pw - 10.0:
+                        slider_key = slider_keys[row_idx]
+                        self._dragging_slider = slider_key
+                        slider = SLIDERS[slider_key]
+                        slider.on_down(lx, track_x, track_w, self)
+                        play_sound("click")
+                        self.area.queue_draw()
+                        self._pressed = True
+                        self.set_targets()
+                        return
+                    key = None
+                    if row_idx == 0:
+                        key = "combo_enabled"
+                    elif row_idx == 4:
+                        key = "combo_ignore_adlibs"
+                    elif row_idx == 5:
+                        key = "combo_strip_brackets"
+                    if key and key in self._toggles:
+                        self._dragging_toggle = (key, x, self._toggles[key].progress, False)
+                        self._toggles[key].set_pressed(True)
+            elif self._current_view == View.EQUALIZER:
+                self._row_list_equalizer.set_pressed(True)
+                row_y_start = 44.0
+                row_h = 35.0
+                if px + 8.0 <= lx <= px + 160.0 and py + 8.0 <= ly <= py + 42.0:
+                    self._pressed = True
+                    self.set_targets()
+                    return
+                slider_keys = {2: "compact_eq_bars", 5: "eq_bars", 6: "eq_sensitivity", 8: "matrix_rows", 9: "matrix_fade_strength", 11: "matrix_opacity"}
+                track_x, track_w = get_slider_layout(px, pw)
+                if px <= lx <= px + pw and ly >= py + row_y_start:
+                    row_idx = int((ly - (py + row_y_start)) / row_h)
+                    if row_idx in slider_keys and lx >= track_x - 14.0 and lx <= px + pw - 10.0:
+                        slider_key = slider_keys[row_idx]
+                        self._dragging_slider = slider_key
+                        slider = SLIDERS[slider_key]
+                        slider.on_down(lx, track_x, track_w, self)
+                        play_sound("click")
+                        self.area.queue_draw()
+                        self._pressed = True
+                        self.set_targets()
+                        return
+                    key = None
+                    if row_idx == 0:
+                        key = "compact_equalizer"
+                    elif row_idx == 3:
+                        key = "mini_equalizer"
+                    if key and key in self._toggles:
+                        self._dragging_toggle = (key, x, self._toggles[key].progress, False)
+                        self._toggles[key].set_pressed(True)
+                    key = None
+                    if row_idx == 0:
+                        key = "compact_equalizer"
+                    elif row_idx == 3:
+                        key = "mini_equalizer"
+                    if key and key in self._toggles:
+                        self._dragging_toggle = (key, x, self._toggles[key].progress, False)
+                        self._toggles[key].set_pressed(True)
 
             self._pressed = True
             self.set_targets()
@@ -1390,6 +1638,12 @@ class MainWindow(Gtk.Window):
             return
 
         if self.is_click_locked():
+            self._dragging_slider = None
+            if self._dragging_toggle:
+                key, _, _, _ = self._dragging_toggle
+                self._dragging_toggle = None
+                if key in self._toggles:
+                    self._toggles[key].set_pressed(False)
             self._pressed = False
             self._bubble_pressed = False
             self._scrubbing = False
@@ -1398,11 +1652,44 @@ class MainWindow(Gtk.Window):
             self._row_list_look.set_pressed(False)
             self._row_list_text_anim.set_pressed(False)
             self._row_list_combo.set_pressed(False)
+            self._row_list_equalizer.set_pressed(False)
             self.set_targets()
             return
 
         lx, ly = self._screen_to_local(x, y)
         px, py, pw, ph, pr, bubble = self._get_pill_and_bubble_rects()
+
+        if self._dragging_toggle:
+            key, _, _, did_drag = self._dragging_toggle
+            self._dragging_toggle = None
+            if key in self._toggles:
+                self._toggles[key].set_pressed(False)
+                if did_drag:
+                    target_on = self._toggles[key].progress >= 0.5
+                    self._apply_toggle_state(key, target_on)
+                else:
+                    cur = getattr(Settings, key, False)
+                    self._apply_toggle_state(key, not cur)
+            self._row_list_settings.set_pressed(False)
+            self._row_list_combo.set_pressed(False)
+            self._row_list_equalizer.set_pressed(False)
+            self._pressed = False
+            self.set_targets()
+            return
+
+        if self._dragging_slider:
+            slider = SLIDERS.get(self._dragging_slider)
+            if slider:
+                slider.on_up(self)
+            self._dragging_slider = None
+            self._row_list_look.set_pressed(False)
+            self._row_list_text_anim.set_pressed(False)
+            self._row_list_combo.set_pressed(False)
+            self._row_list_equalizer.set_pressed(False)
+            self._pressed = False
+            self.set_targets()
+            Settings.save_now()
+            return
 
         if self._bubble_pressed:
             self._bubble_pressed = False
@@ -1451,11 +1738,14 @@ class MainWindow(Gtk.Window):
             return
 
         if self._current_view == View.MEDIA_BIG:
+            now = time.monotonic()
             bx, by, bw, bh = self._btn_prev_rect
             if bx <= lx <= bx + bw and by <= ly <= by + bh:
-                self.skipped(-1)
-                self._skip_prev.play()
-                self._media.previous()
+                if now - getattr(self, "_last_skip_time", 0.0) >= 0.18:
+                    self._last_skip_time = now
+                    self.skipped(-1)
+                    self._skip_prev.play()
+                    self._media.previous()
                 return
 
             bx, by, bw, bh = self._btn_play_rect
@@ -1465,9 +1755,11 @@ class MainWindow(Gtk.Window):
 
             bx, by, bw, bh = self._btn_next_rect
             if bx <= lx <= bx + bw and by <= ly <= by + bh:
-                self.skipped(1)
-                self._skip_next.play()
-                self._media.next()
+                if now - getattr(self, "_last_skip_time", 0.0) >= 0.18:
+                    self._last_skip_time = now
+                    self.skipped(1)
+                    self._skip_next.play()
+                    self._media.next()
                 return
 
             bx, by, bw, bh = self._btn_art_rect
@@ -1587,23 +1879,7 @@ class MainWindow(Gtk.Window):
                 ry = py + row_y_start + idx * row_h
                 if px <= lx <= px + pw and ry <= ly < ry + row_h:
                     cur = getattr(Settings, key)
-                    setattr(Settings, key, not cur)
-                    self._toggles[key].set_state(not cur, animate=True)
-                    if key == "rim":
-                        self.sync_rim(snap=True)
-                    elif key == "lyrics":
-                        self.track_lyrics()
-                    elif key == "weather":
-                        if self._weather.current:
-                            self._apply_weather_changed(self._weather.current)
-                        else:
-                            self._weather_spring.target = 1.0 if Settings.weather else 0.0
-                            self.set_targets()
-                    elif key == "hide_fullscreen":
-                        self.check_fullscreen()
-                    elif key == "capitalize_title":
-                        self.update_lyric()
-                    self.area.queue_draw()
+                    self._apply_toggle_state(key, not cur)
                     return
 
             # Language row
@@ -1671,16 +1947,7 @@ class MainWindow(Gtk.Window):
                 for idx in range(15):
                     ry = py + row_y_start + idx * row_h
                     if ry <= ly < ry + row_h:
-                        if idx == 0:
-                            idx_s = SCALES.index(Settings.scale) if Settings.scale in SCALES else 1
-                            new_scale = SCALES[(idx_s + 1) % len(SCALES)]
-                            self.set_scale(new_scale)
-                            return
-                        elif idx == 1:
-                            self.set_pos_y(Settings.pos_y + mod_step)
-                            return
-                        elif idx == 2:
-                            self.set_pos_x(Settings.pos_x + mod_step)
+                        if idx in (0, 1, 2, 6, 7, 8, 10):
                             return
                         elif idx == 3:
                             aligns = [ALIGN_CENTER, ALIGN_LEFT, ALIGN_RIGHT]
@@ -1699,48 +1966,23 @@ class MainWindow(Gtk.Window):
                             self.update_view()
                             self.set_targets()
                             return
-                        elif idx == 6:
-                            idx_r = RADII.index(Settings.radius) if Settings.radius in RADII else -1
-                            new_radius = RADII[(idx_r + 1) % len(RADII)] if idx_r >= 0 else RADII[0]
-                            self.set_radius(new_radius)
-                            return
-                        elif idx == 7:
-                            idx_h = HEIGHTS.index(Settings.height) if Settings.height in HEIGHTS else -1
-                            new_h = HEIGHTS[(idx_h + 1) % len(HEIGHTS)] if idx_h >= 0 else HEIGHTS[0]
-                            self.set_height(new_h)
-                            return
-                        elif idx == 8:
-                            idx_ts = TEXT_SCALES.index(Settings.text_scale) if Settings.text_scale in TEXT_SCALES else -1
-                            new_ts = TEXT_SCALES[(idx_ts + 1) % len(TEXT_SCALES)] if idx_ts >= 0 else TEXT_SCALES[0]
-                            self.set_text_scale(new_ts)
-                            return
                         elif idx == 9:
                             modes = [MATERIAL_LIQUID, MATERIAL_MATTE, MATERIAL_NONE]
                             cur_idx = modes.index(Settings.material) if Settings.material in modes else 0
                             new_mat = modes[(cur_idx + 1) % len(modes)]
                             self.set_material(new_mat)
                             return
-                        elif idx == 10:
-                            idx_g = GLASS_LEVELS.index(Settings.glass) if Settings.glass in GLASS_LEVELS else -1
-                            new_glass = GLASS_LEVELS[(idx_g + 1) % len(GLASS_LEVELS)] if idx_g >= 0 else GLASS_LEVELS[0]
-                            self.set_glass(new_glass)
-                            return
                         elif idx == 11:
                             Settings.line_bar = not Settings.line_bar
                             self.area.queue_draw()
                             return
                         elif idx == 12:
-                            Settings.equalizer_dots = not Settings.equalizer_dots
-                            self.area.queue_draw()
+                            self.open_panel(Panel.EQUALIZER)
+                            self.update_view()
+                            self.set_targets()
+                            play_sound("click")
                             return
                         elif idx == 13:
-                            bgs = list(PLAYER_BGS)
-                            cur_b = bgs.index(Settings.player_bg) if Settings.player_bg in bgs else 0
-                            Settings.player_bg = bgs[(cur_b + 1) % len(bgs)]
-                            play_sound("click")
-                            self.area.queue_draw()
-                            return
-                        elif idx == 14:
                             colors = [c[0] for c in LOOK_COLORS]
                             cur_idx = colors.index(Settings.accent) if Settings.accent in colors else 0
                             new_accent = colors[(cur_idx + 1) % len(colors)]
@@ -1788,24 +2030,12 @@ class MainWindow(Gtk.Window):
                 for idx in range(6):
                     ry = py + row_y_start + idx * row_h
                     if ry <= ly < ry + row_h:
-                        if idx == 0:
+                        if idx in (1, 2, 3, 4):
+                            return
+                        elif idx == 0:
                             styles = [ANIM_STYLE_LETTERS, ANIM_STYLE_WAVE, ANIM_STYLE_BOUNCE, ANIM_STYLE_SLIDE]
                             cur = styles.index(Settings.lyric_anim_style) if Settings.lyric_anim_style in styles else 0
                             Settings.lyric_anim_style = styles[(cur + 1) % len(styles)]
-                        elif idx == 1:
-                            speeds = [50, 75, 100, 125, 150, 200]
-                            cur = speeds.index(Settings.lyric_anim_speed) if Settings.lyric_anim_speed in speeds else 2
-                            Settings.lyric_anim_speed = speeds[(cur + 1) % len(speeds)]
-                        elif idx == 2:
-                            heights = [15, 20, 26, 32, 40]
-                            cur = heights.index(Settings.lyric_anim_height) if Settings.lyric_anim_height in heights else 2
-                            Settings.lyric_anim_height = heights[(cur + 1) % len(heights)]
-                        elif idx == 3:
-                            staggers = [15, 25, 35, 50]
-                            cur = staggers.index(Settings.lyric_anim_stagger) if Settings.lyric_anim_stagger in staggers else 1
-                            Settings.lyric_anim_stagger = staggers[(cur + 1) % len(staggers)]
-                        elif idx == 4:
-                            Settings.lyric_lead_ahead = not Settings.lyric_lead_ahead
                         elif idx == 5:
                             self.open_panel(Panel.COMBO)
                             self.update_view()
@@ -1852,13 +2082,11 @@ class MainWindow(Gtk.Window):
                 for idx in range(7):
                     ry = py + row_y_start + idx * row_h
                     if ry <= ly < ry + row_h:
-                        if idx == 0:
-                            Settings.combo_enabled = not Settings.combo_enabled
-                            self._toggles["combo_enabled"].set_state(Settings.combo_enabled, animate=True)
-                        elif idx == 1:
-                            reps = [2, 3, 4, 5]
-                            cur = reps.index(Settings.combo_min_repeats) if Settings.combo_min_repeats in reps else 1
-                            Settings.combo_min_repeats = reps[(cur + 1) % len(reps)]
+                        if idx in (1, 6):
+                            return
+                        elif idx == 0:
+                            self._apply_toggle_state("combo_enabled", not Settings.combo_enabled)
+                            return
                         elif idx == 2:
                             styles = list(COMBO_STYLES)
                             cur = styles.index(Settings.combo_counter_style) if Settings.combo_counter_style in styles else 0
@@ -1868,20 +2096,53 @@ class MainWindow(Gtk.Window):
                             cur = splits.index(Settings.combo_split_mode) if Settings.combo_split_mode in splits else 0
                             Settings.combo_split_mode = splits[(cur + 1) % len(splits)]
                         elif idx == 4:
-                            Settings.combo_ignore_adlibs = not Settings.combo_ignore_adlibs
-                            self._toggles["combo_ignore_adlibs"].set_state(Settings.combo_ignore_adlibs, animate=True)
+                            self._apply_toggle_state("combo_ignore_adlibs", not Settings.combo_ignore_adlibs)
+                            return
                         elif idx == 5:
-                            Settings.combo_strip_brackets = not Settings.combo_strip_brackets
-                            self._toggles["combo_strip_brackets"].set_state(Settings.combo_strip_brackets, animate=True)
-                        elif idx == 6:
-                            lens = [1, 2, 3, 4]
-                            cur = lens.index(Settings.combo_min_word_len) if Settings.combo_min_word_len in lens else 1
-                            Settings.combo_min_word_len = lens[(cur + 1) % len(lens)]
+                            self._apply_toggle_state("combo_strip_brackets", not Settings.combo_strip_brackets)
+                            return
 
                         self._compact_lines_cache = None
                         play_sound("click")
                         self.area.queue_draw()
                         return
+
+        if self._current_view == View.EQUALIZER:
+            if px <= lx <= px + 60 and py + 12 <= ly <= py + 40:
+                self.open_panel(Panel.LOOK)
+                self.update_view()
+                self.set_targets()
+                play_sound("click")
+                return
+
+            row_y_start = 44.0
+            row_h = 35.0
+            for idx in range(12):
+                ry = py + row_y_start + idx * row_h
+                if px + 10.0 <= lx <= px + pw - 10.0 and ry <= ly < ry + row_h:
+                    if idx in (2, 5, 6, 8, 9, 11):
+                        return
+                    play_sound("click")
+                    if idx == 0:
+                        self._apply_toggle_state("compact_equalizer", not Settings.compact_equalizer)
+                        return
+                    elif idx == 1:
+                        Settings.compact_eq_dots = not Settings.compact_eq_dots
+                    elif idx == 3:
+                        self._apply_toggle_state("mini_equalizer", not Settings.mini_equalizer)
+                        return
+                    elif idx == 4:
+                        Settings.equalizer_dots = not Settings.equalizer_dots
+                    elif idx == 7:
+                        bgs = list(PLAYER_BGS)
+                        cur = bgs.index(Settings.player_bg) if Settings.player_bg in bgs else 0
+                        Settings.player_bg = bgs[(cur + 1) % len(bgs)]
+                    elif idx == 10:
+                        dens_opt = list(DENSITIES)
+                        cur = dens_opt.index(Settings.matrix_density) if Settings.matrix_density in dens_opt else 1
+                        Settings.matrix_density = dens_opt[(cur + 1) % len(dens_opt)]
+                    self.area.queue_draw()
+                    return
 
         if self._current_view == View.UPDATE:
             if px + 10 <= lx <= px + 150 and py + 12 <= ly <= py + 40:
@@ -1999,20 +2260,14 @@ class MainWindow(Gtk.Window):
             nudge = 1 if up else -1
             mod_step = self.get_modifier_step(controller)
             row_y_start, row_h, swatch_y = self.get_look_layout(ph)
-            row_idx = int((ly - (py + row_y_start)) / row_h)
+            if ly < py + row_y_start and ly < py + swatch_y - 15.0:
+                return True
+            row_idx = int((ly - (py + row_y_start)) / row_h) if ly >= py + row_y_start else -1
 
-            if row_idx == 0:
-                idx = SCALES.index(Settings.scale) if Settings.scale in SCALES else 1
-                new_idx = max(0, min(len(SCALES) - 1, idx + nudge))
-                self.set_scale(SCALES[new_idx])
-                return True
-            elif row_idx == 1:
-                new_y = Settings.pos_y - nudge * mod_step
-                self.set_pos_y(new_y)
-                return True
-            elif row_idx == 2:
-                new_x = Settings.pos_x + nudge * mod_step
-                self.set_pos_x(new_x)
+            slider_keys = {0: "scale", 1: "pos_y", 2: "pos_x", 6: "radius", 7: "height", 8: "text_scale", 10: "glass"}
+            if row_idx in slider_keys:
+                SLIDERS[slider_keys[row_idx]].apply_step(nudge, self)
+                self.area.queue_draw()
                 return True
             elif row_idx == 3:
                 aligns = [ALIGN_CENTER, ALIGN_LEFT, ALIGN_RIGHT]
@@ -2027,22 +2282,9 @@ class MainWindow(Gtk.Window):
                 self.area.queue_draw()
                 return True
             elif row_idx == 5:
-                styles = [ANIM_STYLE_LETTERS, ANIM_STYLE_WAVE, ANIM_STYLE_BOUNCE, ANIM_STYLE_SLIDE]
-                cur = styles.index(Settings.lyric_anim_style) if Settings.lyric_anim_style in styles else 0
-                Settings.lyric_anim_style = styles[(cur + nudge) % len(styles)]
-                self.area.queue_draw()
-                return True
-            elif row_idx == 6:
-                new_radius = max(0, min(100, Settings.radius + nudge * 5))
-                self.set_radius(new_radius)
-                return True
-            elif row_idx == 7:
-                new_h = max(0, min(16, Settings.height + nudge))
-                self.set_height(new_h)
-                return True
-            elif row_idx == 8:
-                new_ts = max(80, min(130, Settings.text_scale + nudge * 5))
-                self.set_text_scale(new_ts)
+                self.open_panel(Panel.TEXT_ANIM)
+                self.update_view()
+                self.set_targets()
                 return True
             elif row_idx == 9:
                 modes = [MATERIAL_LIQUID, MATERIAL_MATTE, MATERIAL_NONE]
@@ -2050,17 +2292,15 @@ class MainWindow(Gtk.Window):
                 new_idx = max(0, min(len(modes) - 1, cur_idx - nudge))
                 self.set_material(modes[new_idx])
                 return True
-            elif row_idx == 10:
-                new_glass = max(20, min(100, Settings.glass + nudge * 5))
-                self.set_glass(new_glass)
-                return True
             elif row_idx == 11:
                 Settings.line_bar = not Settings.line_bar
                 self.area.queue_draw()
                 return True
             elif row_idx == 12:
-                Settings.equalizer_dots = not Settings.equalizer_dots
-                self.area.queue_draw()
+                self.open_panel(Panel.EQUALIZER)
+                self.update_view()
+                self.set_targets()
+                play_sound("click")
                 return True
             elif row_idx == 13 or ly >= py + swatch_y - 15.0:
                 colors = [c[0] for c in LOOK_COLORS]
@@ -2073,42 +2313,100 @@ class MainWindow(Gtk.Window):
             nudge = 1 if up else -1
             row_y_start = 108.0
             row_h = 42.0
+            if ly < py + row_y_start:
+                return True
             row_idx = int((ly - (py + row_y_start)) / row_h)
-            if row_idx == 0:
+            slider_keys = {1: "lyric_anim_speed", 2: "lyric_anim_height", 3: "lyric_anim_stagger", 4: "lyric_lead_sec"}
+            if row_idx in slider_keys:
+                SLIDERS[slider_keys[row_idx]].apply_step(nudge, self)
+                self.area.queue_draw()
+                return True
+            elif row_idx == 0:
                 styles = [ANIM_STYLE_LETTERS, ANIM_STYLE_WAVE, ANIM_STYLE_BOUNCE, ANIM_STYLE_SLIDE]
                 cur = styles.index(Settings.lyric_anim_style) if Settings.lyric_anim_style in styles else 0
                 Settings.lyric_anim_style = styles[(cur + nudge) % len(styles)]
-            elif row_idx == 1:
-                speeds = [50, 75, 100, 125, 150, 200]
-                cur = speeds.index(Settings.lyric_anim_speed) if Settings.lyric_anim_speed in speeds else 2
-                new_idx = max(0, min(len(speeds) - 1, cur + nudge))
-                Settings.lyric_anim_speed = speeds[new_idx]
-            elif row_idx == 2:
-                heights = [15, 20, 26, 32, 40]
-                cur = heights.index(Settings.lyric_anim_height) if Settings.lyric_anim_height in heights else 2
-                new_idx = max(0, min(len(heights) - 1, cur + nudge))
-                Settings.lyric_anim_height = heights[new_idx]
-            elif row_idx == 3:
-                staggers = [15, 25, 35, 50]
-                cur = staggers.index(Settings.lyric_anim_stagger) if Settings.lyric_anim_stagger in staggers else 1
-                new_idx = max(0, min(len(staggers) - 1, cur + nudge))
-                Settings.lyric_anim_stagger = staggers[new_idx]
-            elif row_idx == 4:
-                Settings.lyric_lead_ahead = not Settings.lyric_lead_ahead
+                self.area.queue_draw()
+                return True
+            elif row_idx == 5:
+                self.open_panel(Panel.COMBO)
+                self.update_view()
+                self.set_targets()
+                return True
 
-            preview_text = (
-                self._lyric_target[0]
-                if (self._lyric_target and self._lyric_target[0].strip())
-                else (self._media.title if self._media.has_track else "Динамический остров")
-            )
-            self._preview_prev_text = self._preview_text or preview_text
-            self._preview_text = preview_text
-            self._preview_prev_alpha.value = 1.0
-            self._preview_prev_alpha.target = 0.0
-            self._preview_enter.value = 0.0
-            self._preview_enter.target = 1.0
-            self.area.queue_draw()
-            return True
+        if self._current_view == View.COMBO:
+            nudge = 1 if up else -1
+            row_y_start = 104.0
+            row_h = 42.0
+            if ly < py + row_y_start:
+                return True
+            row_idx = int((ly - (py + row_y_start)) / row_h)
+            slider_keys = {1: "combo_min_repeats", 6: "combo_min_word_len"}
+            if row_idx in slider_keys:
+                SLIDERS[slider_keys[row_idx]].apply_step(nudge, self)
+                self.area.queue_draw()
+                return True
+            elif row_idx == 0:
+                self._apply_toggle_state("combo_enabled", not Settings.combo_enabled)
+                return True
+            elif row_idx == 2:
+                styles = list(COMBO_STYLES)
+                cur = styles.index(Settings.combo_counter_style) if Settings.combo_counter_style in styles else 0
+                Settings.combo_counter_style = styles[(cur + nudge) % len(styles)]
+                self._compact_lines_cache = None
+                self.area.queue_draw()
+                return True
+            elif row_idx == 3:
+                splits = list(COMBO_SPLITS)
+                cur = splits.index(Settings.combo_split_mode) if Settings.combo_split_mode in splits else 0
+                Settings.combo_split_mode = splits[(cur + nudge) % len(splits)]
+                self._compact_lines_cache = None
+                self.area.queue_draw()
+                return True
+            elif row_idx == 4:
+                self._apply_toggle_state("combo_ignore_adlibs", not Settings.combo_ignore_adlibs)
+                return True
+            elif row_idx == 5:
+                self._apply_toggle_state("combo_strip_brackets", not Settings.combo_strip_brackets)
+                return True
+
+        if self._current_view == View.EQUALIZER:
+            nudge = 1 if up else -1
+            row_y_start = 44.0
+            row_h = 35.0
+            if ly < py + row_y_start:
+                return True
+            row_idx = int((ly - (py + row_y_start)) / row_h)
+            slider_keys = {2: "compact_eq_bars", 5: "eq_bars", 6: "eq_sensitivity", 8: "matrix_rows", 9: "matrix_fade_strength", 11: "matrix_opacity"}
+            if row_idx in slider_keys:
+                SLIDERS[slider_keys[row_idx]].apply_step(nudge, self)
+                self.area.queue_draw()
+                return True
+            elif row_idx == 0:
+                self._apply_toggle_state("compact_equalizer", not Settings.compact_equalizer)
+                return True
+            elif row_idx == 1:
+                Settings.compact_eq_dots = not Settings.compact_eq_dots
+                self.area.queue_draw()
+                return True
+            elif row_idx == 3:
+                self._apply_toggle_state("mini_equalizer", not Settings.mini_equalizer)
+                return True
+            elif row_idx == 4:
+                Settings.equalizer_dots = not Settings.equalizer_dots
+                self.area.queue_draw()
+                return True
+            elif row_idx == 7:
+                bgs = list(PLAYER_BGS)
+                cur = bgs.index(Settings.player_bg) if Settings.player_bg in bgs else 0
+                Settings.player_bg = bgs[(cur + nudge) % len(bgs)]
+                self.area.queue_draw()
+                return True
+            elif row_idx == 10:
+                dens_opt = list(DENSITIES)
+                cur = dens_opt.index(Settings.matrix_density) if Settings.matrix_density in dens_opt else 1
+                Settings.matrix_density = dens_opt[(cur + nudge) % len(dens_opt)]
+                self.area.queue_draw()
+                return True
 
         if self._current_view == View.UPDATE:
             avail_h = max(10.0, ph - 165.0)
@@ -2165,6 +2463,8 @@ class MainWindow(Gtk.Window):
                 target = View.SHELF
             elif self._panel == Panel.UPDATE:
                 target = View.UPDATE
+            elif self._panel == Panel.EQUALIZER:
+                target = View.EQUALIZER
             elif self._panel == Panel.TIMER_SET:
                 target = View.TIMER_SET
             elif self._panel == Panel.TIMER:
@@ -2212,6 +2512,37 @@ class MainWindow(Gtk.Window):
         self.sync_spectrum()
         self.sync_rim()
 
+    def _apply_slider_drag(self, slider_key: str, lx: float, px: float, pw: float) -> None:
+        slider = SLIDERS.get(slider_key)
+        if slider:
+            track_x, track_w = get_slider_layout(px, pw)
+            slider.on_move(lx, track_x, track_w, self)
+            self.area.queue_draw()
+
+    def _apply_toggle_state(self, key: str, new_val: bool) -> None:
+        setattr(Settings, key, bool(new_val))
+        if key in self._toggles:
+            self._toggles[key].set_state(bool(new_val), animate=True)
+        if key == "rim":
+            self.sync_rim(snap=True)
+        elif key == "lyrics":
+            self.track_lyrics()
+        elif key == "weather":
+            if self._weather.current:
+                self._apply_weather_changed(self._weather.current)
+            else:
+                self._weather_spring.target = 1.0 if Settings.weather else 0.0
+                self.set_targets()
+        elif key == "hide_fullscreen":
+            self.check_fullscreen()
+        elif key == "capitalize_title":
+            self.update_lyric()
+        elif key in ("combo_enabled", "combo_ignore_adlibs", "combo_strip_brackets"):
+            self._compact_lines_cache = None
+        play_sound("click")
+        Settings.save_now()
+        self.area.queue_draw()
+
     def get_settings_layout(self, ph: float) -> tuple[float, float]:
         row_y_start = 44.0
         avail_for_rows = ph - row_y_start - 12.0
@@ -2221,8 +2552,8 @@ class MainWindow(Gtk.Window):
     def get_look_layout(self, ph: float) -> tuple[float, float, float]:
         row_y_start = 44.0
         avail_for_rows = ph - row_y_start - 48.0
-        row_h = max(24.0, min(36.0, avail_for_rows / 15.0))
-        swatch_y = row_y_start + 15.0 * row_h + 16.0
+        row_h = max(24.0, min(36.0, avail_for_rows / 14.0))
+        swatch_y = row_y_start + 14.0 * row_h + 16.0
         return row_y_start, row_h, swatch_y
 
     @classmethod
@@ -2236,6 +2567,7 @@ class MainWindow(Gtk.Window):
             View.SHELF: 1,
             View.UPDATE: 2,
             View.TEXT_ANIM: 2,
+            View.EQUALIZER: 2,
             View.COMBO: 3,
         }
         if from_v in depth and to_v in depth:
@@ -2300,6 +2632,8 @@ class MainWindow(Gtk.Window):
         self._r.target = (d.r + pull * 0.3) * Settings.radius / 100.0
         self._lean.target = lean
         self._cover_scale.target = 0.85 if (self._current_view == View.MEDIA_BIG and not self._media.is_playing) else 1.0
+        self._size.target = Settings.scale / 100.0
+        self._pos_x.target = float(Settings.pos_x)
 
         if Settings.notch:
             self._gap.target = 0.0
@@ -2427,7 +2761,7 @@ class MainWindow(Gtk.Window):
 
     def sync_spectrum(self) -> None:
         visible = self._current_view in (View.MEDIA, View.TOAST, View.MEDIA_BIG)
-        self._spectrum.active = visible and self._media.is_playing
+        self._spectrum.active = visible
 
     def on_frame_tick(self, widget: Gtk.Widget, frame_clock: Gdk.FrameClock) -> bool:
         now = time.monotonic()
@@ -2575,11 +2909,13 @@ class MainWindow(Gtk.Window):
 
         if self._current_view in (View.MEDIA, View.TOAST, View.MEDIA_BIG):
             bands = self._spectrum.get_bands()
-            peak = self._audio.peak()
-            playing = self._media.is_playing
+            peak = self._spectrum.peak
+            playing = self._media.is_playing or any(b > 0.01 for b in bands)
             moving |= self._eq_small.tick(bands, peak, playing, now, dt)
             moving |= self._eq_toast.tick(bands, peak, playing, now, dt)
             moving |= self._eq_big.tick(bands, peak, playing, now, dt)
+            if self._current_view == View.MEDIA_BIG:
+                moving |= self._starfield.tick(self._eq_big.levels, playing, dt)
 
         moving |= self._cover_small.tick(dt)
         moving |= self._cover_toast.tick(dt)
@@ -2607,9 +2943,13 @@ class MainWindow(Gtk.Window):
         moving |= self._row_list_menu.tick(dt)
         moving |= self._row_list_settings.tick(dt)
         moving |= self._row_list_look.tick(dt)
+        moving |= self._row_list_equalizer.tick(dt)
 
         for tog in self._toggles.values():
             moving |= tog.tick(dt)
+
+        for spec in SLIDERS.values():
+            moving |= spec.tick(dt)
 
         if self._view_transition < 1.0:
             self._view_transition = min(1.0, self._view_transition + dt / 0.22)
@@ -3354,10 +3694,12 @@ class MainWindow(Gtk.Window):
                 return (current[1], current[0], end_t, at >= current[0])
 
         start = idx + 1 if idx >= 0 else 0
-        for j in range(start, len(lines)):
-            line_t, line_text = lines[j]
-            if line_text.strip() and not is_wordless(line_text) and line_t - at <= LYRIC_LOOKAHEAD:
-                return (line_text, line_t, end_of(j), False)
+        lead_sec = float(Settings.lyric_lead_sec) if Settings.lyric_lead_ahead else 0.0
+        if lead_sec > 0.0:
+            for j in range(start, len(lines)):
+                line_t, line_text = lines[j]
+                if line_text.strip() and not is_wordless(line_text) and line_t - at <= lead_sec:
+                    return (line_text, line_t, end_of(j), False)
 
         return None
 
@@ -3652,6 +3994,10 @@ class MainWindow(Gtk.Window):
         self.area.queue_draw()
 
     def destroy(self) -> None:
+        try:
+            Settings.save_now()
+        except Exception:
+            pass
         for s in ("_network", "_audio", "_media", "_battery", "_spectrum", "_alarm"):
             srv = getattr(self, s, None)
             if srv and hasattr(srv, "stop"):
@@ -3662,6 +4008,10 @@ class MainWindow(Gtk.Window):
         super().destroy()
 
     def exit_island(self) -> None:
+        try:
+            Settings.save_now()
+        except Exception:
+            pass
         self._alarm.stop()
         self.get_application().quit()
 
@@ -3950,6 +4300,8 @@ class MainWindow(Gtk.Window):
             self.render_shelf(cr, px, py, pw, ph, alpha)
         elif view == View.UPDATE:
             self.render_update(cr, px, py, pw, ph, alpha)
+        elif view == View.EQUALIZER:
+            self.render_equalizer_settings(cr, px, py, pw, ph, alpha)
 
     def render_idle(self, cr: cairo.Context, px: float, py: float, pw: float, ph: float, alpha: float) -> None:
         weather_info = self._weather.current if (Settings.weather and self._weather.has_weather) else None
@@ -4004,14 +4356,6 @@ class MainWindow(Gtk.Window):
             )
 
     def render_media(self, cr: cairo.Context, px: float, py: float, pw: float, ph: float, alpha: float) -> None:
-        if self._media.is_playing and Settings.equalizer_dots:
-            self._dotmatrix.render(
-                cr, px, py, pw, ph,
-                alpha=0.55 * alpha,
-                levels=self._spectrum.levels,
-                color=self._accent_color,
-            )
-
         art_size = 22.0
         art_x = px + 7.0
         art_y = py + (ph - art_size) / 2.0
@@ -4027,7 +4371,9 @@ class MainWindow(Gtk.Window):
         eq_h = 16.0
         eq_x = px + pw - 13.0 - eq_w
         eq_y = py + (ph - eq_h) / 2.0
-        self._eq_small.render(cr, eq_x, eq_y, eq_w, eq_h, color=self._accent_color, alpha=alpha, dots=Settings.equalizer_dots)
+        if Settings.compact_equalizer:
+            self._eq_small.bars = Settings.compact_eq_bars
+            self._eq_small.render(cr, eq_x, eq_y, eq_w, eq_h, color=self._accent_color, alpha=alpha, dots=Settings.compact_eq_dots)
 
         mid_x = art_x + art_size + 7.0
         mid_w = eq_x - mid_x - 7.0
@@ -4222,14 +4568,6 @@ class MainWindow(Gtk.Window):
         cr.fill()
 
     def render_toast(self, cr: cairo.Context, px: float, py: float, pw: float, ph: float, alpha: float) -> None:
-        if self._media.is_playing and Settings.equalizer_dots:
-            self._dotmatrix.render(
-                cr, px, py, pw, ph,
-                alpha=0.45 * alpha,
-                levels=self._spectrum.levels,
-                color=self._accent_color,
-            )
-
         art_size = 44.0
         art_x = px + 12.0
         art_y = py + (ph - art_size) / 2.0
@@ -4544,11 +4882,11 @@ class MainWindow(Gtk.Window):
     def render_media_big(self, cr: cairo.Context, px: float, py: float, pw: float, ph: float, alpha: float) -> None:
         # Player background visuals (DotMatrix, StarField)
         bg_mode = Settings.player_bg
-        levels = self._spectrum.levels
+        levels = self._eq_big.levels
         if bg_mode in (PLAYER_BG_STARS, PLAYER_BG_BOTH):
-            self._starfield.render(cr, px, py, pw, ph, alpha=0.75 * alpha, levels=levels)
+            self._starfield.render(cr, px, py, pw, ph, alpha=0.85 * alpha, levels=levels)
         if bg_mode in (PLAYER_BG_MATRIX, PLAYER_BG_BOTH):
-            self._dotmatrix.render(cr, px, py, pw, ph, alpha=0.85 * alpha, levels=levels, color=self._accent_color)
+            self._dotmatrix.render(cr, px, py, pw, ph, alpha=0.95 * alpha, levels=self._spectrum.levels, color=self._accent_color, radius=self._r.value)
 
         cover_scale = max(0.5, min(1.0, self._cover_scale.value))
         art_size = 64.0 * cover_scale
@@ -4565,14 +4903,19 @@ class MainWindow(Gtk.Window):
             cr.fill()
             render_icon(cr, Glyph.Note, art_x + 17.0 * cover_scale, art_y + 17.0 * cover_scale, 30.0 * cover_scale, COLOR_DIM[:3], alpha=alpha)
 
-        eq_w = 38.0
-        eq_h = 26.0
-        eq_x = px + pw - 22.0 - eq_w
-        eq_y = py + 38.0
-        self._eq_big.render(cr, eq_x, eq_y, eq_w, eq_h, color=self._accent_color, alpha=alpha, dots=Settings.equalizer_dots)
+        if Settings.mini_equalizer:
+            eq_w = 38.0
+            eq_h = 26.0
+            eq_x = px + pw - 22.0 - eq_w
+            eq_y = py + 38.0
+            self._eq_big.bars = Settings.eq_bars
+            self._eq_big.render(cr, eq_x, eq_y, eq_w, eq_h, color=self._accent_color, alpha=alpha, dots=Settings.equalizer_dots)
+            right_bound = eq_x - 12.0
+        else:
+            right_bound = px + pw - 22.0
 
         mid_x = px + 20.0 + 64.0 + 14.0
-        mid_w = eq_x - mid_x - 12.0
+        mid_w = right_bound - mid_x
         draw_text(
             cr,
             self._media.title or "Аудио",
@@ -5084,28 +5427,35 @@ class MainWindow(Gtk.Window):
         }
         bg_label = bg_labels.get(Settings.player_bg, "Свечение")
         rows = [
-            (Glyph.Size, "Размер", f"{Settings.scale}%"),
-            (Glyph.Gap, "Позиция Y (Отступ)", f"{Settings.pos_y} px"),
-            (Glyph.Size, "Позиция X (Смещение)", pos_x_str),
-            (Glyph.Lines, "Выравнивание", align_label),
-            (Glyph.Look, "Форма острова", shape_label),
-            (Glyph.Sparkle, "Анимация текста", "Настроить >"),
-            (Glyph.Rim, "Радиус скругления", f"{Settings.radius}%"),
-            (Glyph.Expand, "Высота острова", f"{Settings.height} px"),
-            (Glyph.Lines, "Размер текста", f"{Settings.text_scale}%"),
-            (Glyph.Look, "Стиль стекла", material_label),
-            (Glyph.Sparkle, "Сила стекла", f"{Settings.glass}%"),
-            (Glyph.Lines, "Полоса трека", seek_style_label),
-            (Glyph.Pulse, "Эквалайзер", eq_style_label),
-            (Glyph.Sparkle, "Фон плеера", bg_label),
-            (Glyph.Drop, "Акцентный цвет", cur_accent_label),
+            (Glyph.Size, "Размер", "slider", "scale"),
+            (Glyph.Gap, t("pos_y", "Позиция Y"), "slider", "pos_y"),
+            (Glyph.Size, t("pos_x", "Позиция X"), "slider", "pos_x"),
+            (Glyph.Lines, "Выравнивание", "cycle", align_label),
+            (Glyph.Look, "Форма острова", "action", shape_label),
+            (Glyph.Sparkle, "Анимация текста", "action", "Настроить >"),
+            (Glyph.Rim, "Радиус скругления", "slider", "radius"),
+            (Glyph.Expand, "Высота острова", "slider", "height"),
+            (Glyph.Lines, "Размер текста", "slider", "text_scale"),
+            (Glyph.Look, "Стиль стекла", "cycle", material_label),
+            (Glyph.Sparkle, "Сила стекла", "slider", "glass"),
+            (Glyph.Lines, "Полоса трека", "action", seek_style_label),
+            (Glyph.Pulse, "Эквалайзер", "action", "Настроить >"),
+            (Glyph.Drop, "Акцентный цвет", "action", cur_accent_label),
         ]
         row_y_start, row_h, swatch_y = self.get_look_layout(ph)
-        for idx, (glyph, label, val_text) in enumerate(rows):
+        track_x, track_w = get_slider_layout(px, pw)
+        for idx, (glyph, label, kind, target) in enumerate(rows):
             ry = py + row_y_start + idx * row_h
             render_icon(cr, glyph, px + 22.0, ry + (row_h - 17.0) / 2.0, 17.0, COLOR_DIM[:3], alpha=alpha)
             draw_text(cr, label, px + 49.0, ry + row_h / 2.0, font_size=13.0, bold=False, color=COLOR_WHITE, alpha=alpha, align="left", valign="center")
-            draw_text(cr, val_text, px + pw - 24.0, ry + row_h / 2.0, font_size=13.0, bold=False, color=COLOR_DIM[:3], alpha=alpha, align="right", valign="center")
+            if kind == "slider":
+                slider = SLIDERS[target]
+                slider.sync_to_settings(self)
+                slider.render(cr, track_x, ry + (row_h - SLIDER_HEIGHT) / 2.0, track_w, SLIDER_HEIGHT, accent_color=self._accent_color, alpha=alpha)
+                val_text = slider.format_val(None, self)
+                draw_text(cr, val_text, px + pw - 16.0, ry + row_h / 2.0, font_size=12.5, bold=False, color=COLOR_DIM[:3], alpha=alpha, align="right", valign="center")
+            else:
+                draw_text(cr, target, px + pw - 24.0, ry + row_h / 2.0, font_size=13.0, bold=False, color=COLOR_DIM[:3], alpha=alpha, align="right", valign="center")
 
         swatch_y_abs = py + swatch_y
         step_x = (pw - 20.0) / len(LOOK_COLORS)
@@ -5207,21 +5557,29 @@ class MainWindow(Gtk.Window):
         cur_style_lbl = style_labels.get(Settings.lyric_anim_style, "По буквам")
 
         rows = [
-            (Glyph.Lines, "Стиль эффекта", cur_style_lbl),
-            (Glyph.Sparkle, "Скорость", f"{Settings.lyric_anim_speed}%"),
-            (Glyph.Expand, "Высота вылета", f"{Settings.lyric_anim_height} px"),
-            (Glyph.Pulse, "Задержка букв", f"{Settings.lyric_anim_stagger} мс"),
-            (Glyph.Clock, "Пред-показ строк", "За 5 сек" if Settings.lyric_lead_ahead else "Выкл"),
-            (Glyph.Pulse, "Комбо повторов", "Настроить >"),
+            (Glyph.Lines, "Стиль эффекта", "cycle", cur_style_lbl),
+            (Glyph.Sparkle, "Скорость", "slider", "lyric_anim_speed"),
+            (Glyph.Expand, "Высота вылета", "slider", "lyric_anim_height"),
+            (Glyph.Pulse, "Задержка букв", "slider", "lyric_anim_stagger"),
+            (Glyph.Clock, "Пред-показ строк", "slider", "lyric_lead_sec"),
+            (Glyph.Pulse, "Комбо повторов", "action", "Настроить >"),
         ]
 
         row_y_start = 108.0
         row_h = 42.0
-        for idx, (glyph, label, val_text) in enumerate(rows):
+        track_x, track_w = get_slider_layout(px, pw)
+        for idx, (glyph, label, kind, target) in enumerate(rows):
             ry = py + row_y_start + idx * row_h
             render_icon(cr, glyph, px + 22.0, ry + (row_h - 17.0) / 2.0, 17.0, COLOR_DIM[:3], alpha=alpha)
             draw_text(cr, label, px + 49.0, ry + row_h / 2.0, font_size=13.0, bold=False, color=COLOR_WHITE, alpha=alpha, align="left", valign="center")
-            draw_text(cr, val_text, px + pw - 24.0, ry + row_h / 2.0, font_size=13.0, bold=False, color=COLOR_DIM[:3], alpha=alpha, align="right", valign="center")
+            if kind == "slider":
+                slider = SLIDERS[target]
+                slider.sync_to_settings(self)
+                slider.render(cr, track_x, ry + (row_h - SLIDER_HEIGHT) / 2.0, track_w, SLIDER_HEIGHT, accent_color=self._accent_color, alpha=alpha)
+                val_text = slider.format_val(None, self)
+                draw_text(cr, val_text, px + pw - 16.0, ry + row_h / 2.0, font_size=12.5, bold=False, color=COLOR_DIM[:3], alpha=alpha, align="right", valign="center")
+            else:
+                draw_text(cr, target, px + pw - 24.0, ry + row_h / 2.0, font_size=13.0, bold=False, color=COLOR_DIM[:3], alpha=alpha, align="right", valign="center")
 
     def render_combo(self, cr: cairo.Context, px: float, py: float, pw: float, ph: float, alpha: float) -> None:
         render_icon(cr, Glyph.Back, px + 20.0, py + 18.0, 10.0, COLOR_DIM[:3], alpha=0.6 * alpha)
@@ -5317,24 +5675,90 @@ class MainWindow(Gtk.Window):
 
         rows = [
             (Glyph.Pulse, t("combo_enabled"), "toggle", "combo_enabled"),
-            (Glyph.Lines, t("combo_repeats"), "cycle", f"{Settings.combo_min_repeats}"),
+            (Glyph.Lines, t("combo_repeats"), "slider", "combo_min_repeats"),
             (Glyph.Sparkle, t("combo_style"), "cycle", cur_style_lbl),
             (Glyph.Lines, t("combo_split"), "cycle", cur_split_lbl),
             (Glyph.Note, t("combo_ignore_adlibs"), "toggle", "combo_ignore_adlibs"),
             (Glyph.Look, t("combo_strip_brackets"), "toggle", "combo_strip_brackets"),
-            (Glyph.Expand, t("combo_min_word_len"), "cycle", cur_len_lbl),
+            (Glyph.Expand, t("combo_min_word_len"), "slider", "combo_min_word_len"),
         ]
 
         row_y_start = 104.0
         row_h = 42.0
+        track_x, track_w = get_slider_layout(px, pw)
         for idx, (glyph, label, kind, val) in enumerate(rows):
             ry = py + row_y_start + idx * row_h
             render_icon(cr, glyph, px + 22.0, ry + (row_h - 17.0) / 2.0, 17.0, COLOR_DIM[:3], alpha=alpha)
             draw_text(cr, label, px + 49.0, ry + row_h / 2.0, font_size=13.0, bold=False, color=COLOR_WHITE, alpha=alpha, align="left", valign="center")
             if kind == "toggle":
                 self._toggles[val].render(cr, px + pw - 58.0, ry + (row_h - 24.0) / 2.0, w=46.0, h=24.0)
+            elif kind == "slider":
+                slider = SLIDERS[val]
+                slider.sync_to_settings(self)
+                slider.render(cr, track_x, ry + (row_h - SLIDER_HEIGHT) / 2.0, track_w, SLIDER_HEIGHT, accent_color=self._accent_color, alpha=alpha)
+                val_text = slider.format_val(None, self)
+                draw_text(cr, val_text, px + pw - 16.0, ry + row_h / 2.0, font_size=12.5, bold=False, color=COLOR_DIM[:3], alpha=alpha, align="right", valign="center")
             else:
                 draw_text(cr, val, px + pw - 24.0, ry + row_h / 2.0, font_size=13.0, bold=False, color=COLOR_DIM[:3], alpha=alpha, align="right", valign="center")
+
+    def render_equalizer_settings(self, cr: cairo.Context, px: float, py: float, pw: float, ph: float, alpha: float) -> None:
+        title = t("equalizer_title")
+        render_icon(cr, Glyph.Back, px + 20.0, py + 18.0, 10.0, COLOR_DIM[:3], alpha=0.6 * alpha)
+        draw_text(cr, title, px + 36.0, py + 23.0, font_size=10.5, bold=True, color=COLOR_DIM[:3], alpha=0.6 * alpha, align="left", valign="center")
+
+        self._row_list_equalizer.render_highlight(cr, w=pw - 20.0, x=px + 10.0)
+
+        compact_style_str = "Точки" if Settings.compact_eq_dots else "Полоски"
+        mini_style_str = "Точки" if Settings.equalizer_dots else "Полоски"
+        bg_labels = {
+            PLAYER_BG_GLOW: "Свечение",
+            PLAYER_BG_MATRIX: "Матрица",
+            PLAYER_BG_STARS: "Звёзды",
+            PLAYER_BG_BOTH: "Всё вместе",
+        }
+        bg_label = bg_labels.get(Settings.player_bg, "Свечение")
+        density_labels = {
+            DENSITY_SPARSE: "Редкая",
+            DENSITY_STANDARD: "Стандарт",
+            DENSITY_DENSE: "Плотная",
+        }
+        density_label = density_labels.get(Settings.matrix_density, "Стандарт")
+        fade_label = f"{Settings.matrix_fade_strength}%" if Settings.matrix_fade_strength > 0 else "Выкл"
+
+        rows = [
+            (Glyph.Pulse, "На плашке (свернуто)", "toggle", "compact_equalizer"),
+            (Glyph.Pulse, "Стиль на плашке", "cycle", compact_style_str),
+            (Glyph.Lines, "Полосы на плашке", "slider", "compact_eq_bars"),
+            (Glyph.Pulse, "Мини-эквалайзер", "toggle", "mini_equalizer"),
+            (Glyph.Pulse, "Стиль мини-эквалайзера", "cycle", mini_style_str),
+            (Glyph.Lines, "Полосы в плеере", "slider", "eq_bars"),
+            (Glyph.Sparkle, "Чувствительность", "slider", "eq_sensitivity"),
+            (Glyph.Sparkle, "Фон плеера", "cycle", bg_label),
+            (Glyph.Lines, "Ряды матрицы фона", "slider", "matrix_rows"),
+            (Glyph.Sparkle, "Сила градиента", "slider", "matrix_fade_strength"),
+            (Glyph.Lines, "Плотность матрицы", "cycle", density_label),
+            (Glyph.Sparkle, "Яркость матрицы", "slider", "matrix_opacity"),
+        ]
+
+        row_y_start = 44.0
+        row_h = 35.0
+        tog_w = 42.0
+        tog_h = 22.0
+        track_x, track_w = get_slider_layout(px, pw)
+        for idx, (glyph, label, kind, val_target) in enumerate(rows):
+            ry = py + row_y_start + idx * row_h
+            render_icon(cr, glyph, px + 22.0, ry + (row_h - 16.0) / 2.0, 16.0, COLOR_DIM[:3], alpha=alpha)
+            draw_text(cr, label, px + 48.0, ry + row_h / 2.0, font_size=12.5, bold=False, color=COLOR_WHITE, alpha=alpha, align="left", valign="center")
+            if kind == "toggle":
+                self._toggles[val_target].render(cr, px + pw - 56.0, ry + (row_h - tog_h) / 2.0, w=tog_w, h=tog_h)
+            elif kind == "slider":
+                slider = SLIDERS[val_target]
+                slider.sync_to_settings(self)
+                slider.render(cr, track_x, ry + (row_h - SLIDER_HEIGHT) / 2.0, track_w, SLIDER_HEIGHT, accent_color=self._accent_color, alpha=alpha)
+                val_text = slider.format_val(None, self)
+                draw_text(cr, val_text, px + pw - 16.0, ry + row_h / 2.0, font_size=12.5, bold=False, color=COLOR_DIM[:3], alpha=alpha, align="right", valign="center")
+            else:
+                draw_text(cr, val_target, px + pw - 24.0, ry + row_h / 2.0, font_size=12.5, bold=False, color=COLOR_DIM[:3], alpha=alpha, align="right", valign="center")
 
     def render_update(self, cr: cairo.Context, px: float, py: float, pw: float, ph: float, alpha: float) -> None:
         render_icon(cr, Glyph.Back, px + 20.0, py + 18.0, 10.0, COLOR_DIM[:3], alpha=0.6 * alpha)

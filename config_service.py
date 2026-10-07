@@ -76,6 +76,7 @@ class ConfigService:
             "lyric_anim_height",
             "lyric_anim_stagger",
             "lyric_lead_ahead",
+            "lyric_lead_sec",
             # Combo
             "combo_enabled",
             "combo_min_repeats",
@@ -94,6 +95,18 @@ class ConfigService:
             "capitalize_title",
             "line_bar",
             "equalizer_dots",
+            "compact_equalizer",
+            "compact_eq_dots",
+            "compact_eq_bars",
+            "mini_equalizer",
+            "eq_bars",
+            "eq_sensitivity",
+            "matrix_rows",
+            "matrix_fade",
+            "matrix_fade_strength",
+            "matrix_density",
+            "matrix_opacity",
+            "player_bg",
             "language",
         ]
 
@@ -116,7 +129,7 @@ class ConfigService:
             data = {
                 "magic": DNI_MAGIC,
                 "version": DNI_VERSION,
-                "app_version": "1.0.6",
+                "app_version": "1.0.7",
                 "timestamp": int(time.time()),
                 "exported_at": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                 "name": name,

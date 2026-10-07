@@ -36,6 +36,10 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "ru": "ОФОРМЛЕНИЕ", "en": "APPEARANCE", "es": "APARIENCIA", "de": "AUSSEHEN",
         "fr": "APPARENCE", "it": "ASPETTO", "pt": "APARÊNCIA", "zh": "外观", "ja": "外観", "uk": "ОФОРМЛЕННЯ"
     },
+    "equalizer_title": {
+        "ru": "ЭКВАЛАЙЗЕР", "en": "EQUALIZER", "es": "ECUALIZADOR", "de": "EQUALIZER",
+        "fr": "ÉGALISEUR", "it": "EQUALIZZATORE", "pt": "EQUALIZADOR", "zh": "均衡器", "ja": "イコライザー", "uk": "ЕКВАЛАЙЗЕР"
+    },
     "text_anim_title": {
         "ru": "АНИМАЦИЯ ТЕКСТА", "en": "TEXT ANIMATION", "es": "ANIMACIÓN DE TEXTO", "de": "TEXTANIMATION",
         "fr": "ANIMATION DU TEXTE", "it": "ANIMAZIONE TESTO", "pt": "ANIMAÇÃO DE TEXTO", "zh": "文本动画", "ja": "テキストアニメーション", "uk": "АНІМАЦІЯ ТЕКСТУ"
@@ -169,6 +173,14 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
     "scale": {
         "ru": "Масштаб", "en": "Scale", "es": "Escala", "de": "Skalierung",
         "fr": "Échelle", "it": "Scala", "pt": "Escala", "zh": "整体缩放", "ja": "拡大率", "uk": "Масштаб"
+    },
+    "pos_x": {
+        "ru": "Позиция X", "en": "Position X", "es": "Posición X", "de": "Position X",
+        "fr": "Position X", "it": "Posizione X", "pt": "Posição X", "zh": "X 坐标", "ja": "X 位置", "uk": "Позиція X"
+    },
+    "pos_y": {
+        "ru": "Позиция Y", "en": "Position Y", "es": "Posición Y", "de": "Position Y",
+        "fr": "Position Y", "it": "Posizione Y", "pt": "Posição Y", "zh": "Y 坐标", "ja": "Y 位置", "uk": "Позиція Y"
     },
     "gap": {
         "ru": "Отступ сверху", "en": "Top gap", "es": "Espacio superior", "de": "Oberer Abstand",

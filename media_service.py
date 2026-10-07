@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import atexit
 import base64
 import colorsys
 import hashlib
@@ -31,7 +32,7 @@ COVER_CACHE_DIR = (
 ) / "dynamic-island" / "covers"
 
 TURN_DEGREES: float = 28.0
-MIN_MUSIC_DURATION: float = 30.0
+MIN_MUSIC_DURATION: float = 3.0
 
 DEFAULT_PALETTE: list[tuple[float, float, float]] = [(1.0, 1.0, 1.0)]
 DEFAULT_ACCENT: tuple[float, float, float] = (1.0, 1.0, 1.0)
@@ -475,6 +476,7 @@ class MediaService:
 
         self._thread = threading.Thread(target=self._worker_loop, daemon=True, name="MediaService-DBus")
         self._thread.start()
+        atexit.register(self.close)
 
     @property
     def is_playing(self) -> bool:
@@ -1090,6 +1092,15 @@ class MediaService:
         new_album = str(meta.get("xesam:album", "") or "")
         raw_url = str(meta.get("xesam:url", "") or "")
 
+        # Graceful preservation: if metadata is temporarily empty/partial during track transition,
+        # do not blank out the active track to avoid jittery UI flickering
+        if not new_title and old_title and session.playback_status in ("Playing", "Paused"):
+            new_title = old_title
+            if not new_artist:
+                new_artist = old_artist
+            if not new_album:
+                new_album = session.album
+
         track_changed = (
             (new_title and new_title != old_title)
             or (new_track_id and new_track_id != old_track_id)
@@ -1111,16 +1122,7 @@ class MediaService:
         length_us = meta.get("mpris:length", 0)
         session.duration = max(0.0, float(length_us) / 1_000_000.0) if length_us else 0.0
 
-        # Fast path: instant disk cache lookup by deterministic artist - title key
-        # Skips all network requests and subprocess calls (playerctl, yt-dlp)
-        cached_cover = find_cached_cover(new_artist, new_title)
-        if cached_cover:
-            crop_to_square(cached_cover)
-            session.art_path = str(cached_cover)
-            new_art_url = str(meta.get("mpris:artUrl", "") or meta.get("artUrl", "") or meta.get("xesam:artUrl", "") or "")
-            session.art_url = new_art_url or cached_cover.as_uri()
-            return
-
+        # Priority 1: Use the cover provided by the player (mpris:artUrl, artUrl, xesam:artUrl)
         new_art_url = str(meta.get("mpris:artUrl", "") or "")
         if not new_art_url:
             new_art_url = str(meta.get("artUrl", "") or meta.get("xesam:artUrl", "") or "")
@@ -1132,7 +1134,7 @@ class MediaService:
                     ["playerctl", "-p", pname, "metadata", "mpris:artUrl"],
                     capture_output=True,
                     text=True,
-                    timeout=0.5,
+                    timeout=0.4,
                     check=False,
                 )
                 if res.returncode == 0 and res.stdout.strip():
@@ -1140,7 +1142,7 @@ class MediaService:
             except Exception:
                 pass
 
-        if not new_art_url:
+        if not new_art_url and raw_url:
             if raw_url.startswith("file://"):
                 local_music = Path(urllib.parse.unquote(urllib.parse.urlsplit(raw_url).path))
             elif raw_url.startswith("/"):
@@ -1156,18 +1158,19 @@ class MediaService:
                         new_art_url = cand_path.as_uri()
                         break
 
-        if track_changed:
+        if new_art_url:
             session.art_url = new_art_url
-            session.art_path = None
-            if new_art_url:
-                session.art_path = self._process_art_url(new_art_url, session=session)
-            else:
-                self._resolve_session_art(session)
+            session.art_path = self._process_art_url(new_art_url, session=session)
         else:
-            if new_art_url and (new_art_url != old_art_url or not session.art_path):
-                session.art_url = new_art_url
-                session.art_path = self._process_art_url(new_art_url, session=session)
-            elif not session.art_path and not session.art_url:
+            # Priority 2 & 3: Player gave no artUrl -> check local cache or schedule yt-dlp fallback
+            session.art_url = ""
+            cached_cover = find_cached_cover(new_artist, new_title)
+            if cached_cover:
+                crop_to_square(cached_cover)
+                session.art_path = str(cached_cover)
+                session.art_url = cached_cover.as_uri()
+            else:
+                session.art_path = None
                 self._resolve_session_art(session)
 
     def _process_art_url(self, art_url: str, session: Optional[PlayerSession] = None) -> Optional[str]:
@@ -1177,11 +1180,6 @@ class MediaService:
         try:
             title = session.title if session else ""
             artist = session.artist if session else ""
-
-            cached_track = find_cached_cover(artist, title)
-            if cached_track:
-                crop_to_square(cached_track)
-                return str(cached_track)
 
             cached_by_url = find_cached_cover_by_url(art_url)
             if cached_by_url:
@@ -1696,22 +1694,24 @@ class MediaService:
         if not player:
             return False
 
-        try:
-            self._bus.call_sync(
-                player,
-                "/org/mpris/MediaPlayer2",
-                "org.mpris.MediaPlayer2.Player",
-                method,
-                params,
-                None,
-                Gio.DBusCallFlags.NONE,
-                1500,
-                None,
-            )
-            return True
-        except Exception as e:
-            logger.debug("Player method %s failed on %s: %s", method, player, e)
-            return False
+        def _worker():
+            try:
+                self._bus.call_sync(
+                    player,
+                    "/org/mpris/MediaPlayer2",
+                    "org.mpris.MediaPlayer2.Player",
+                    method,
+                    params,
+                    None,
+                    Gio.DBusCallFlags.NONE,
+                    1500,
+                    None,
+                )
+            except Exception as e:
+                logger.debug("Player method %s failed on %s: %s", method, player, e)
+
+        threading.Thread(target=_worker, daemon=True).start()
+        return True
 
     def play_pause(self) -> None:
         self._call_player_method("PlayPause")

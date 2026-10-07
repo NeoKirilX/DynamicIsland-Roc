@@ -58,6 +58,15 @@ class Toggle:
         self._held = bool(pressed)
         self._target_press = 1.0 if pressed else 0.0
 
+    def set_drag_fraction(self, fraction: float) -> None:
+        self._animating = False
+        self._progress = max(0.0, min(1.0, float(fraction)))
+        self._from_progress = self._progress
+        self._target_progress = self._progress
+        self._velocity = 0.0
+        self._held = True
+        self._target_press = 1.0
+
     def set_state(self, on: bool, animate: bool = True) -> None:
         on = bool(on)
         self._on = on

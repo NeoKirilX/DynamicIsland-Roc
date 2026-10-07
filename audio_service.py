@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import atexit
 import json
 import logging
 import re
@@ -13,6 +14,16 @@ from dataclasses import dataclass
 from typing import Callable, Optional
 
 logger = logging.getLogger(__name__)
+
+def _set_pdeathsig() -> None:
+    try:
+        import ctypes
+        libc = ctypes.CDLL("libc.so.6")
+        PR_SET_PDEATHSIG = 1
+        SIGTERM = 15
+        libc.prctl(PR_SET_PDEATHSIG, SIGTERM)
+    except Exception:
+        pass
 
 @dataclass
 class AudioDevice:
@@ -60,6 +71,7 @@ class AudioService:
         self._sub_proc: Optional[subprocess.Popen] = None
         self._monitor_thread: Optional[threading.Thread] = None
         self._start_monitor()
+        atexit.register(self.close)
 
     def _query_volume_raw(self) -> tuple[float, bool]:
         if self._has_wpctl:
@@ -731,6 +743,7 @@ class AudioService:
                         stderr=subprocess.DEVNULL,
                         text=True,
                         bufsize=1,
+                        preexec_fn=_set_pdeathsig,
                     )
                     while self._running and self._sub_proc.stdout:
                         line = self._sub_proc.stdout.readline()

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import atexit
 import json
 import logging
 import os
@@ -23,7 +24,7 @@ CONFIG_FILE = CONFIG_DIR / "settings.json"
 xdg_cache = os.environ.get("XDG_CACHE_HOME")
 CACHE_DIR = (Path(xdg_cache) if xdg_cache else (Path.home() / ".cache")) / "dynamic-island"
 
-MIN_SCALE = 85
+MIN_SCALE = 75
 MAX_SCALE = 130
 MAX_GAP = 24
 MIN_RADIUS = 0
@@ -32,7 +33,7 @@ MIN_GLASS = 20
 MAX_GLASS = 100
 MIN_HEIGHT = 0
 MAX_HEIGHT = 16
-MIN_TEXT = 80
+MIN_TEXT = 75
 MAX_TEXT = 130
 DEFAULT_RADIUS = 100
 MATERIAL_MATTE = "matte"
@@ -73,6 +74,11 @@ PLAYER_BG_MATRIX = "matrix"      # Матрица точек
 PLAYER_BG_STARS = "stars"        # Звёзды
 PLAYER_BG_BOTH = "both"          # Матрица и звёзды
 PLAYER_BGS = (PLAYER_BG_GLOW, PLAYER_BG_MATRIX, PLAYER_BG_STARS, PLAYER_BG_BOTH)
+
+DENSITY_SPARSE = "sparse"        # Редкая (шаг 10)
+DENSITY_STANDARD = "standard"    # Стандарт (шаг 8)
+DENSITY_DENSE = "dense"          # Плотная (шаг 6)
+DENSITIES = (DENSITY_SPARSE, DENSITY_STANDARD, DENSITY_DENSE)
 
 COMBO_SPLIT_ALL = "all"          # Все варианты (комбинированный)
 COMBO_SPLIT_PUNCT = "punct"      # По знакам
@@ -161,11 +167,21 @@ class _SettingsMeta(type):
 
     @property
     def lyric_anim_height(cls) -> int:
-        return max(10, min(50, cls._get_int("lyric_anim_height", 26)))
+        return max(10, min(80, cls._get_int("lyric_anim_height", 26)))
 
     @lyric_anim_height.setter
     def lyric_anim_height(cls, value: int) -> None:
-        cls._set("lyric_anim_height", max(10, min(50, int(value))))
+        cls._set("lyric_anim_height", max(10, min(80, int(value))))
+
+    @property
+    def lyric_lead_sec(cls) -> int:
+        return max(0, min(9, cls._get_int("lyric_lead_sec", 5 if cls.lyric_lead_ahead else 0)))
+
+    @lyric_lead_sec.setter
+    def lyric_lead_sec(cls, value: int) -> None:
+        val = max(0, min(9, int(value)))
+        cls._set("lyric_lead_sec", val)
+        cls._set("lyric_lead_ahead", bool(val > 0))
 
     @property
     def lyric_lead_ahead(cls) -> bool:
@@ -174,6 +190,10 @@ class _SettingsMeta(type):
     @lyric_lead_ahead.setter
     def lyric_lead_ahead(cls, value: bool) -> None:
         cls._set("lyric_lead_ahead", bool(value))
+        if not bool(value):
+            cls._set("lyric_lead_sec", 0)
+        elif cls.lyric_lead_sec <= 0:
+            cls._set("lyric_lead_sec", 5)
 
     @property
     def combo_enabled(cls) -> bool:
@@ -464,6 +484,102 @@ class _SettingsMeta(type):
         cls.equalizer_dots = value
 
     @property
+    def compact_equalizer(cls) -> bool:
+        return cls._get_bool("compact_equalizer", False)
+
+    @compact_equalizer.setter
+    def compact_equalizer(cls, value: bool) -> None:
+        cls._set("compact_equalizer", bool(value))
+
+    @property
+    def compact_eq_dots(cls) -> bool:
+        return cls._get_bool("compact_eq_dots", True)
+
+    @compact_eq_dots.setter
+    def compact_eq_dots(cls, value: bool) -> None:
+        cls._set("compact_eq_dots", bool(value))
+
+    @property
+    def compact_eq_bars(cls) -> int:
+        return cls._get_int("compact_eq_bars", 4)
+
+    @compact_eq_bars.setter
+    def compact_eq_bars(cls, value: int) -> None:
+        cls._set("compact_eq_bars", max(2, min(8, int(value))))
+
+    @property
+    def mini_equalizer(cls) -> bool:
+        return cls._get_bool("mini_equalizer", True)
+
+    @mini_equalizer.setter
+    def mini_equalizer(cls, value: bool) -> None:
+        cls._set("mini_equalizer", bool(value))
+
+    @property
+    def eq_bars(cls) -> int:
+        return cls._get_int("eq_bars", 5)
+
+    @eq_bars.setter
+    def eq_bars(cls, value: int) -> None:
+        cls._set("eq_bars", max(3, min(9, int(value))))
+
+    @property
+    def eq_sensitivity(cls) -> int:
+        return cls._get_int("eq_sensitivity", 100)
+
+    @eq_sensitivity.setter
+    def eq_sensitivity(cls, value: int) -> None:
+        cls._set("eq_sensitivity", max(50, min(200, int(value))))
+
+    @property
+    def matrix_rows(cls) -> int:
+        return cls._get_int("matrix_rows", 12)
+
+    @matrix_rows.setter
+    def matrix_rows(cls, value: int) -> None:
+        cls._set("matrix_rows", max(4, min(20, int(value))))
+
+    @property
+    def matrix_fade_strength(cls) -> int:
+        return cls._get_int("matrix_fade_strength", 70)
+
+    @matrix_fade_strength.setter
+    def matrix_fade_strength(cls, value: int) -> None:
+        cls._set("matrix_fade_strength", max(0, min(100, int(value))))
+
+    @property
+    def matrix_fade(cls) -> bool:
+        return cls.matrix_fade_strength > 0
+
+    @matrix_fade.setter
+    def matrix_fade(cls, value: bool) -> None:
+        if bool(value):
+            if cls.matrix_fade_strength <= 0:
+                cls.matrix_fade_strength = 70
+        else:
+            cls.matrix_fade_strength = 0
+
+    @property
+    def matrix_density(cls) -> str:
+        val = str(cls._data.get("matrix_density", DENSITY_STANDARD)).lower()
+        return val if val in DENSITIES else DENSITY_STANDARD
+
+    @matrix_density.setter
+    def matrix_density(cls, value: str) -> None:
+        val = str(value).lower()
+        if val not in DENSITIES:
+            val = DENSITY_STANDARD
+        cls._set("matrix_density", val)
+
+    @property
+    def matrix_opacity(cls) -> int:
+        return cls._get_int("matrix_opacity", 95)
+
+    @matrix_opacity.setter
+    def matrix_opacity(cls, value: int) -> None:
+        cls._set("matrix_opacity", max(30, min(100, int(value))))
+
+    @property
     def scale(cls) -> int:
         val = cls._get_int("scale", 100)
         return max(MIN_SCALE, min(MAX_SCALE, val))
@@ -724,7 +840,7 @@ class Settings(metaclass=_SettingsMeta):
         with cls._save_lock:
             if cls._save_timer is not None:
                 cls._save_timer.cancel()
-            cls._save_timer = threading.Timer(0.35, cls.save_now)
+            cls._save_timer = threading.Timer(0.15, cls.save_now)
             cls._save_timer.daemon = True
             cls._save_timer.start()
 
@@ -800,6 +916,7 @@ class Settings(metaclass=_SettingsMeta):
             cls._listeners.remove(listener)
 
 Settings.load()
+atexit.register(Settings.save_now)
 
 if __name__ == "__main__":
     print("Testing Settings...")

@@ -17,7 +17,7 @@ logger = logging.getLogger(__name__)
 
 REPO_OWNER = "NeoKirilX"
 REPO_NAME = "DynamicIsland-Roc"
-CURRENT_VERSION = "1.0.6"
+CURRENT_VERSION = "1.0.7"
 API_URL = f"https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/releases/latest"
 
 class UpdateState:
@@ -204,6 +204,11 @@ class Updater:
             logger.error("Installation failed: %s", exc)
 
     def restart(self) -> None:
+        try:
+            from settings import Settings
+            Settings.save_now()
+        except Exception:
+            pass
         try:
             exe_path = os.path.realpath(sys.argv[0])
             os.execv(exe_path, [exe_path])

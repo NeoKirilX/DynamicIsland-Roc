@@ -6,16 +6,21 @@ from typing import Sequence
 
 import cairo
 
+try:
+    from settings import Settings
+except ImportError:
+    Settings = None
+
 class Equalizer:
 
     BAR_WIDTH: float = 3.0
     ATTACK: float = 0.03
     RELEASE: float = 0.17
 
-    RANGE_DB: float = 10.0
+    RANGE_DB: float = 22.0
     CENTER: float = 0.5
-    RISE: float = 0.4
-    SINK: float = 0.5
+    RISE: float = 0.04
+    SINK: float = 0.35
     SPREAD_DB: float = 24.0
     FLOOR_DB: float = -70.0
 
@@ -86,7 +91,7 @@ class Equalizer:
         if not playing:
             for i in range(self._bars):
                 self._targets[i] = 0.0
-        elif spectrum_bands is not None and any(b > 1e-9 for b in spectrum_bands):
+        elif spectrum_bands is not None and any(b > 1e-6 for b in spectrum_bands):
             self._update_levels(spectrum_bands, dt)
         else:
             self._wobble(peak, t)
@@ -106,37 +111,57 @@ class Equalizer:
         return moved
 
     def _update_levels(self, spectrum: Sequence[float], dt: float) -> None:
-        headroom = self.RANGE_DB * (1.0 - self.CENTER)
-        top = self.FLOOR_DB
         spectrum_len = len(spectrum)
+        # Check if spectrum is pre-normalized (e.g. from Cava 0.0 .. 1.0)
+        is_normalized = max(spectrum) <= 1.05 and any(b > 0.001 for b in spectrum)
 
+        sens = (Settings.eq_sensitivity / 100.0) if Settings is not None else 1.0
+
+        if is_normalized:
+            for i in range(self._bars):
+                r = self._rank[i]
+                from_b = r * spectrum_len // self._bars
+                to_b = max((r + 1) * spectrum_len // self._bars, from_b + 1)
+                raw_val = sum(spectrum[b] for b in range(from_b, to_b)) / float(to_b - from_b)
+                self._targets[i] = max(0.0, min(1.0, (raw_val ** 1.05) * 1.15 * sens))
+            return
+
+        # Otherwise raw power -> dB mapping
+        dbs = []
         for i in range(self._bars):
             from_b = self._rank[i] * spectrum_len // self._bars
             to_b = max((self._rank[i] + 1) * spectrum_len // self._bars, from_b + 1)
-            power = sum(spectrum[b] for b in range(from_b, to_b))
-            db = 10.0 * math.log10(power / float(to_b - from_b) + 1e-14)
+            power = sum(spectrum[b] for b in range(from_b, to_b)) / float(to_b - from_b)
+            db = 10.0 * math.log10(max(1e-9, power))
             self._db[i] = db
+            dbs.append(db)
 
-            if db > self.FLOOR_DB:
-                b = self._base[i]
-                b += (db - b) * (1.0 - math.exp(-dt / (self.RISE if db > b else self.SINK)))
-                self._base[i] = max(b, db - headroom)
-            top = max(top, self._base[i])
+            # Adaptive dynamic baseline per frequency band
+            b = self._base[i]
+            rate = self.RISE if db > b else self.SINK
+            b += (db - b) * (1.0 - math.exp(-dt / rate))
+            self._base[i] = max(self.FLOOR_DB, b)
+
+        top = max(max(dbs), -40.0)
+        floor = top - self.RANGE_DB
 
         for i in range(self._bars):
-            reference = max(self._base[i], top - self.SPREAD_DB)
-            val = self.CENTER + (self._db[i] - reference) / self.RANGE_DB
-            self._targets[i] = max(0.0, min(1.0, val))
+            val = (self._db[i] - floor) / max(1.0, self.RANGE_DB)
+            norm = max(0.0, min(1.0, val * sens))
+            self._targets[i] = norm ** 1.25
 
     def _wobble(self, peak: float, t: float) -> None:
-        eff_peak = 0.55 if peak <= 0.0 else peak
-        level = math.pow(max(0.0, min(1.0, eff_peak * 1.8)), 0.6)
+        eff_peak = 0.25 if peak <= 0.0 else min(1.0, peak * 0.8)
+        level = math.pow(eff_peak, 0.8)
         mid = (self._bars - 1) / 2.0
         for i in range(self._bars):
             f_idx = i % 8
-            noise = 0.5 + 0.5 * math.sin(t * self.F1[f_idx] + i * 1.9) * math.cos(t * self.F2[f_idx] + i * 0.7)
+            n1 = math.sin(t * self.F1[f_idx] + i * 1.9)
+            n2 = math.cos(t * self.F2[f_idx] + i * 0.7)
+            noise = 0.5 + 0.5 * n1 * n2
             envelope = 1.0 - 0.3 * abs(i - mid) / mid if mid > 0 else 1.0
-            self._targets[i] = level * envelope * (0.3 + 0.7 * noise)
+            target = level * envelope * (0.2 + 0.5 * noise)
+            self._targets[i] = max(0.0, min(1.0, target * 0.5))
 
     def render(
         self,

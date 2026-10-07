@@ -301,7 +301,7 @@ def main() -> int:
     parser.add_argument(
         "--version",
         action="version",
-        version="DynamicIsland-Roc 1.0.0",
+        version="DynamicIsland-Roc 1.0.7",
     )
 
     args = parser.parse_args()
@@ -364,7 +364,21 @@ def main() -> int:
 
     from main_window import MainWindow
 
-    signal.signal(signal.SIGINT, signal.SIG_DFL)
+    try:
+        subprocess.run(["killall", "-q", "pactl"], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except Exception:
+        pass
+
+    def _handle_exit_signal(sig, frame):
+        try:
+            from settings import Settings
+            Settings.save_now()
+        except Exception:
+            pass
+        sys.exit(0)
+
+    signal.signal(signal.SIGINT, _handle_exit_signal)
+    signal.signal(signal.SIGTERM, _handle_exit_signal)
 
     app = Gtk.Application(
         application_id="io.github.dynamic_island",

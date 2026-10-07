@@ -1,22 +1,37 @@
 
 from __future__ import annotations
 
+import atexit
+import logging
 import math
+import os
 import select
+import shutil
 import subprocess
 import threading
 import time
+
+logger = logging.getLogger(__name__)
+
+def _set_pdeathsig() -> None:
+    try:
+        import ctypes
+        libc = ctypes.CDLL("libc.so.6")
+        PR_SET_PDEATHSIG = 1
+        SIGTERM = 15
+        libc.prctl(PR_SET_PDEATHSIG, SIGTERM)
+    except Exception:
+        pass
 
 try:
     import numpy as np
 except ImportError:
     np = None
 
-BANDS: int = 5
-BAND_NAMES: tuple[str, ...] = ("sub_bass", "bass", "mid", "high_mid", "treble")
+BANDS: int = 16
 
-_F1: tuple[float, ...] = (7.1, 9.3, 6.2, 10.4, 8.0)
-_F2: tuple[float, ...] = (2.3, 3.1, 1.7, 2.9, 3.7)
+_F1: tuple[float, ...] = (7.1, 9.3, 6.2, 10.4, 8.0, 5.6, 9.9, 7.7, 8.4, 6.8, 9.1, 7.3, 10.1, 8.7, 6.0, 7.9)
+_F2: tuple[float, ...] = (2.3, 3.1, 1.7, 2.9, 3.7, 2.1, 1.3, 3.3, 2.7, 3.5, 1.9, 2.5, 3.9, 2.2, 1.5, 3.0)
 
 class SpectrumAnalyzer:
 
@@ -24,9 +39,10 @@ class SpectrumAnalyzer:
     MAX_HZ: float = 14000.0
     TILT_DB: float = 4.2
 
-    def __init__(self, rate: int = 24000, size: int = 1024) -> None:
+    def __init__(self, rate: int = 24000, size: int = 1024, bands: int = BANDS) -> None:
         self.rate: int = rate
         self.size: int = size
+        self.bands: int = bands
         while self.size < rate * 0.04:
             self.size <<= 1
 
@@ -52,21 +68,21 @@ class SpectrumAnalyzer:
         tilt = 10.0 ** (self.TILT_DB * np.log2(center_hz / 1000.0) / 10.0)
 
         num_bins = self.size // 2 + 1
-        self.weights = np.zeros((BANDS, num_bins), dtype=np.float32)
-        group_size = fine_bands // BANDS
+        self.weights = np.zeros((self.bands, num_bins), dtype=np.float32)
+        group_size = max(1, fine_bands // self.bands)
 
         for b in range(fine_bands):
             lo = edges[b]
             hi = edges[b + 1]
             last = min(int(hi + 0.5), num_bins - 1)
-            b5 = b // group_size
+            b_target = min(self.bands - 1, b // group_size)
             for k in range(int(lo + 0.5), last + 1):
                 overlap = max(0.0, min(hi, k + 0.5) - max(lo, k - 0.5))
-                self.weights[b5, k] += (overlap * tilt[b]) / float(group_size)
+                self.weights[b_target, k] += (overlap * tilt[b]) / float(group_size)
 
     def analyze(self, samples: Any) -> Any:
         if np is None or self.weights is None:
-            return [0.0] * BANDS
+            return [0.0] * self.bands
         if len(samples) < self.size:
             padded = np.zeros(self.size, dtype=np.float32)
             padded[-len(samples):] = samples
@@ -98,6 +114,9 @@ class SpectrumService:
         self._stop_event: threading.Event = threading.Event()
         self._thread: threading.Thread | None = None
         self._proc: subprocess.Popen | None = None
+        self._fifo_fd: int | None = None
+        self._fifo_path: str | None = None
+        self._conf_path: str | None = None
 
         self._active: bool = False
         self._failed: bool = False
@@ -110,6 +129,7 @@ class SpectrumService:
         self._ring_head: int = 0
 
         self._bands: list[float] = [0.0] * BANDS
+        atexit.register(self.close)
 
     @property
     def active(self) -> bool:
@@ -151,13 +171,19 @@ class SpectrumService:
     def read_bands(self, out_bands: list[float]) -> bool:
         now = time.monotonic()
         with self._lock:
-            if (self._failed or self._is_silent or (now - self._last_data_time > self.SILENCE_SEC)) and self.fallback_wobble:
-                self._generate_wobble(now)
+            if self._is_silent or (now - self._last_data_time > self.SILENCE_SEC) or self._failed:
+                if self.fallback_wobble and self._peak > 1e-4:
+                    self._generate_wobble(now)
+                    bands = self._bands
+                else:
+                    bands = [0.0] * BANDS
+            else:
+                bands = self._bands
 
             if out_bands is not None:
                 if len(out_bands) < BANDS:
                     out_bands.extend([0.0] * (BANDS - len(out_bands)))
-                out_bands[:BANDS] = self._bands[:BANDS]
+                out_bands[:BANDS] = bands[:BANDS]
             return True
 
     def get_bands(self) -> list[float]:
@@ -188,39 +214,125 @@ class SpectrumService:
             self._bands[i] = float(target * 0.40)
 
     def _open_capture(self) -> bool:
-        targets = ["@DEFAULT_MONITOR@", "@DEFAULT_SINK@.monitor", None]
-        for target in targets:
-            cmd = [
-                "parec",
-                "--raw",
-                f"--rate={self.rate}",
-                "--channels=1",
-                "--format=s16le",
-                "--latency-msec=40",
-            ]
-            if target:
-                cmd.extend(["-d", target])
-
+        # Cava engine (standard 16-band audio visualizer on Linux)
+        if shutil.which("cava"):
             try:
+                pid = os.getpid()
+                self._fifo_path = f"/tmp/cava_island_{pid}.fifo"
+                self._conf_path = f"/tmp/cava_island_{pid}.conf"
+
+                if os.path.exists(self._fifo_path):
+                    try:
+                        os.remove(self._fifo_path)
+                    except Exception:
+                        pass
+                os.mkfifo(self._fifo_path)
+
+                conf_content = f"""[general]
+bars = {BANDS}
+framerate = 60
+autosens = 1
+sensitivity = 100
+
+[input]
+method = pipewire
+source = auto
+
+[output]
+method = raw
+raw_target = {self._fifo_path}
+data_format = binary
+bit_format = 8bit
+channels = mono
+mono_option = average
+
+[smoothing]
+monstercat = 1
+waves = 0
+noise_reduction = 30
+"""
+                with open(self._conf_path, "w") as f:
+                    f.write(conf_content)
+
                 proc = subprocess.Popen(
-                    cmd,
-                    stdout=subprocess.PIPE,
+                    ["cava", "-p", self._conf_path],
+                    stdout=subprocess.DEVNULL,
                     stderr=subprocess.DEVNULL,
+                    preexec_fn=_set_pdeathsig,
                 )
-                r, _, _ = select.select([proc.stdout], [], [], 0.35)
-                if r and proc.stdout:
+                time.sleep(0.12)
+                if proc.poll() is None:
+                    self._fifo_fd = os.open(self._fifo_path, os.O_RDONLY | os.O_NONBLOCK)
                     self._proc = proc
                     self._failed = False
                     self._last_data_time = time.monotonic()
                     return True
                 proc.terminate()
-                proc.wait()
-            except (FileNotFoundError, OSError):
-                break
+            except Exception as e:
+                logger.debug("Failed starting cava: %s", e)
+                self._close_capture()
+
+        # Fallback to native PipeWire capture
+        if shutil.which("pw-record"):
+            try:
+                proc = subprocess.Popen(
+                    ["pw-record", "--raw", f"--rate={self.rate}", "--channels=1", "--format=s16", "-"],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.DEVNULL,
+                    preexec_fn=_set_pdeathsig,
+                )
+                time.sleep(0.05)
+                if proc.poll() is None:
+                    self._proc = proc
+                    self._failed = False
+                    self._last_data_time = time.monotonic()
+                    return True
+            except Exception as e:
+                logger.debug("pw-record open failed: %s", e)
+
+        # Fallback to parec
+        if shutil.which("parec"):
+            targets = ["@DEFAULT_MONITOR@", "@DEFAULT_SINK@.monitor", None]
+            for target in targets:
+                cmd = [
+                    "parec",
+                    "--raw",
+                    f"--rate={self.rate}",
+                    "--channels=1",
+                    "--format=s16le",
+                    "--latency-msec=30",
+                ]
+                if target:
+                    cmd.extend(["-d", target])
+
+                try:
+                    proc = subprocess.Popen(
+                        cmd,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.DEVNULL,
+                        preexec_fn=_set_pdeathsig,
+                    )
+                    time.sleep(0.05)
+                    if proc.poll() is None:
+                        self._proc = proc
+                        self._failed = False
+                        self._last_data_time = time.monotonic()
+                        return True
+                    proc.terminate()
+                    proc.wait(timeout=0.2)
+                except (FileNotFoundError, OSError):
+                    break
 
         return False
 
     def _close_capture(self) -> None:
+        if self._fifo_fd is not None:
+            try:
+                os.close(self._fifo_fd)
+            except Exception:
+                pass
+            self._fifo_fd = None
+
         if self._proc is not None:
             try:
                 self._proc.terminate()
@@ -231,6 +343,20 @@ class SpectrumService:
                 except Exception:
                     pass
             self._proc = None
+
+        if self._fifo_path and os.path.exists(self._fifo_path):
+            try:
+                os.remove(self._fifo_path)
+            except Exception:
+                pass
+            self._fifo_path = None
+
+        if self._conf_path and os.path.exists(self._conf_path):
+            try:
+                os.remove(self._conf_path)
+            except Exception:
+                pass
+            self._conf_path = None
 
         with self._lock:
             self._is_silent = True
@@ -264,11 +390,6 @@ class SpectrumService:
         return np.concatenate((self._ring[self._ring_head :], self._ring[: self._ring_head]))
 
     def _run(self) -> None:
-        if np is None:
-            while not self._stop_event.is_set():
-                self._stop_event.wait(0.5)
-            return
-
         last_active = time.monotonic()
         bytes_to_read = self.CHUNK_SAMPLES * 2
 
@@ -288,11 +409,61 @@ class SpectrumService:
                     time.sleep(1.0)
                     continue
 
+            # 1. Cava FIFO mode (fast, direct, non-blocking)
+            if self._fifo_fd is not None:
+                r, _, _ = select.select([self._fifo_fd], [], [], 0.04)
+                if not r:
+                    if now - self._last_data_time > self.SILENCE_SEC:
+                        with self._lock:
+                            self._is_silent = True
+                            self._bands = [0.0] * BANDS
+                    continue
+
+                try:
+                    raw = os.read(self._fifo_fd, BANDS)
+                    if not raw:
+                        self._close_capture()
+                        time.sleep(0.1)
+                        continue
+
+                    # Drain FIFO to the latest available frame for zero latency
+                    while True:
+                        r2, _, _ = select.select([self._fifo_fd], [], [], 0)
+                        if not r2:
+                            break
+                        next_raw = os.read(self._fifo_fd, BANDS)
+                        if len(next_raw) >= BANDS:
+                            raw = next_raw
+                        else:
+                            break
+
+                    if len(raw) >= BANDS:
+                        vals = [float(b) / 255.0 for b in raw[:BANDS]]
+                        peak = max(vals)
+                        with self._lock:
+                            self._peak = max(peak, self._peak * 0.92)
+                            if peak > 0.005:
+                                self._is_silent = False
+                                self._last_data_time = now
+                                self._bands = vals
+                            elif now - self._last_data_time > self.SILENCE_SEC:
+                                self._is_silent = True
+                                self._bands = [0.0] * BANDS
+                except Exception:
+                    self._close_capture()
+                    time.sleep(0.1)
+                continue
+
+            # 2. Fallback pw-record/parec raw PCM mode
+            if self._proc.stdout is None:
+                continue
+
             r, _, _ = select.select([self._proc.stdout], [], [], 0.05)
-            if not r or self._proc.stdout is None:
+            if not r:
                 if now - self._last_data_time > self.SILENCE_SEC:
                     with self._lock:
                         self._is_silent = True
+                        self._bands = [0.0] * BANDS
                 continue
 
             try:
@@ -305,27 +476,27 @@ class SpectrumService:
                 time.sleep(0.1)
                 continue
 
-            samples = np.frombuffer(raw_bytes, dtype=np.int16).astype(np.float32) / 32768.0
-            chunk_peak = float(np.max(np.abs(samples))) if len(samples) > 0 else 0.0
+            if np is not None:
+                samples = np.frombuffer(raw_bytes, dtype=np.int16).astype(np.float32) / 32768.0
+                chunk_peak = float(np.max(np.abs(samples))) if len(samples) > 0 else 0.0
+                self._push_samples(samples)
 
-            self._push_samples(samples)
-
-            with self._lock:
-                self._peak = max(chunk_peak, self._peak * 0.92)
-
-                if chunk_peak > 1e-4:
-                    self._is_silent = False
-                    self._last_data_time = now
-                    window = self._get_ordered_window()
-                    computed = self._analyzer.analyze(window)
-                    self._bands = [float(b) for b in computed]
-                elif now - self._last_data_time > self.SILENCE_SEC:
-                    self._is_silent = True
+                with self._lock:
+                    self._peak = max(chunk_peak, self._peak * 0.92)
+                    if chunk_peak > 1e-4:
+                        self._is_silent = False
+                        self._last_data_time = now
+                        window = self._get_ordered_window()
+                        computed = self._analyzer.analyze(window)
+                        self._bands = [float(b) for b in computed]
+                    elif now - self._last_data_time > self.SILENCE_SEC:
+                        self._is_silent = True
+                        self._bands = [0.0] * BANDS
 
 if __name__ == "__main__":
     print("Testing SpectrumAnalyzer and SpectrumService...")
 
-    analyzer = SpectrumAnalyzer(rate=24000, size=1024)
+    analyzer = SpectrumAnalyzer(rate=24000, size=1024, bands=5)
     t = np.arange(1024, dtype=np.float32) / 24000.0
 
     sub_bass_sine = np.sin(2.0 * np.pi * 80.0 * t).astype(np.float32)
@@ -353,7 +524,7 @@ if __name__ == "__main__":
     bands = [0.0] * BANDS
     ok = service.read_bands(bands)
     assert ok, "SpectrumService.read_bands returned False"
-    assert len(bands) == 5, f"Expected 5 bands, got {len(bands)}"
+    assert len(bands) == 16, f"Expected 16 bands, got {len(bands)}"
     print(f"SpectrumService live read_bands: {bands}, peak={service.peak:.4f}, silent={service.is_silent}")
 
     service.peak = 0.5
