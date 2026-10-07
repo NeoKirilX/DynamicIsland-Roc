@@ -4004,6 +4004,14 @@ class MainWindow(Gtk.Window):
             )
 
     def render_media(self, cr: cairo.Context, px: float, py: float, pw: float, ph: float, alpha: float) -> None:
+        if self._media.is_playing and Settings.equalizer_dots:
+            self._dotmatrix.render(
+                cr, px, py, pw, ph,
+                alpha=0.55 * alpha,
+                levels=self._spectrum.levels,
+                color=self._accent_color,
+            )
+
         art_size = 22.0
         art_x = px + 7.0
         art_y = py + (ph - art_size) / 2.0
@@ -4019,7 +4027,7 @@ class MainWindow(Gtk.Window):
         eq_h = 16.0
         eq_x = px + pw - 13.0 - eq_w
         eq_y = py + (ph - eq_h) / 2.0
-        self._eq_small.render(cr, eq_x, eq_y, eq_w, eq_h, color=self._accent_color, alpha=alpha)
+        self._eq_small.render(cr, eq_x, eq_y, eq_w, eq_h, color=self._accent_color, alpha=alpha, dots=Settings.equalizer_dots)
 
         mid_x = art_x + art_size + 7.0
         mid_w = eq_x - mid_x - 7.0
@@ -4214,6 +4222,14 @@ class MainWindow(Gtk.Window):
         cr.fill()
 
     def render_toast(self, cr: cairo.Context, px: float, py: float, pw: float, ph: float, alpha: float) -> None:
+        if self._media.is_playing and Settings.equalizer_dots:
+            self._dotmatrix.render(
+                cr, px, py, pw, ph,
+                alpha=0.45 * alpha,
+                levels=self._spectrum.levels,
+                color=self._accent_color,
+            )
+
         art_size = 44.0
         art_x = px + 12.0
         art_y = py + (ph - art_size) / 2.0
@@ -4229,7 +4245,7 @@ class MainWindow(Gtk.Window):
         eq_h = 20.0
         eq_x = px + pw - 20.0 - eq_w
         eq_y = py + (ph - eq_h) / 2.0
-        self._eq_toast.render(cr, eq_x, eq_y, eq_w, eq_h, color=self._accent_color, alpha=alpha)
+        self._eq_toast.render(cr, eq_x, eq_y, eq_w, eq_h, color=self._accent_color, alpha=alpha, dots=Settings.equalizer_dots)
 
         mid_x = art_x + art_size + 12.0
         mid_w = eq_x - mid_x - 10.0

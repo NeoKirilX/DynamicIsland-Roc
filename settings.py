@@ -413,14 +413,14 @@ class _SettingsMeta(type):
 
     @property
     def player_bg(cls) -> str:
-        val = str(cls._data.get("player_bg", PLAYER_BG_GLOW)).lower()
-        return val if val in PLAYER_BGS else PLAYER_BG_GLOW
+        val = str(cls._data.get("player_bg", PLAYER_BG_BOTH)).lower()
+        return val if val in PLAYER_BGS else PLAYER_BG_BOTH
 
     @player_bg.setter
     def player_bg(cls, value: str) -> None:
         val = str(value).lower()
         if val not in PLAYER_BGS:
-            val = PLAYER_BG_GLOW
+            val = PLAYER_BG_BOTH
         cls._set("player_bg", val)
 
     @property
@@ -449,7 +449,7 @@ class _SettingsMeta(type):
 
     @property
     def equalizer_dots(cls) -> bool:
-        return cls._get_bool("equalizer_dots", False)
+        return cls._get_bool("equalizer_dots", True)
 
     @equalizer_dots.setter
     def equalizer_dots(cls, value: bool) -> None:
