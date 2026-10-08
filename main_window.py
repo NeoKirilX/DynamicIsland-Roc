@@ -499,6 +499,7 @@ class MainWindow(Gtk.Window):
         self.is_layer_shell = Gtk4LayerShell.is_supported()
         if self.is_layer_shell:
             Gtk4LayerShell.init_for_window(self)
+            Gtk4LayerShell.set_namespace(self, "dynamic-island")
             Gtk4LayerShell.set_layer(self, Gtk4LayerShell.Layer.OVERLAY)
             Gtk4LayerShell.set_anchor(self, Gtk4LayerShell.Edge.TOP, True)
             Gtk4LayerShell.set_anchor(self, Gtk4LayerShell.Edge.BOTTOM, True)
@@ -610,6 +611,7 @@ class MainWindow(Gtk.Window):
             "lyrics": Toggle(Settings.lyrics),
             "lyric_effects": Toggle(Settings.lyric_effects),
             "rim": Toggle(Settings.rim),
+            "shadow": Toggle(Settings.shadow),
             "app_volume": Toggle(Settings.app_volume),
             "network": Toggle(Settings.network),
             "weather": Toggle(Settings.weather),
@@ -1566,6 +1568,7 @@ class MainWindow(Gtk.Window):
                     "lyrics",
                     "lyric_effects",
                     "rim",
+                    "shadow",
                     "app_volume",
                     "network",
                     "weather",
@@ -1937,6 +1940,7 @@ class MainWindow(Gtk.Window):
                 "lyrics",
                 "lyric_effects",
                 "rim",
+                "shadow",
                 "app_volume",
                 "network",
                 "weather",
@@ -2599,6 +2603,8 @@ class MainWindow(Gtk.Window):
             self._toggles[key].set_state(bool(new_val), animate=True)
         if key == "rim":
             self.sync_rim(snap=True)
+        elif key == "shadow":
+            self.set_shadow(new_val)
         elif key == "lyrics":
             self.track_lyrics()
         elif key == "weather":
@@ -4093,6 +4099,16 @@ class MainWindow(Gtk.Window):
         self.sync_rim()
         self.area.queue_draw()
 
+    def set_shadow(self, enabled: bool) -> None:
+        Settings.shadow = bool(enabled)
+        if "shadow" in self._toggles:
+            self._toggles["shadow"].set_state(bool(enabled), animate=True)
+        self._dirty_rect = None
+        self.area.queue_draw()
+
+    def remove_shadow(self) -> None:
+        self.set_shadow(False)
+
     def destroy(self) -> None:
         try:
             Settings.save_now()
@@ -4241,7 +4257,7 @@ class MainWindow(Gtk.Window):
         cr.scale(scale, scale)
 
         nf = self._notch.value
-        if h > 40.0 or nf > 0.01:
+        if Settings.shadow and (h > 40.0 or nf > 0.01):
             shadow_alpha = min(0.6, (h - 40.0) / 60.0 * 0.5) if h > 40.0 else 0.20 * nf
             cr.save()
             Goo._add_rounded_rect_path(
@@ -5483,6 +5499,7 @@ class MainWindow(Gtk.Window):
             (Glyph.Lines, t("lyrics"), "lyrics"),
             (Glyph.Sparkle, t("lyric_effects"), "lyric_effects"),
             (Glyph.Rim, t("rim"), "rim"),
+            (Glyph.Moon, t("shadow"), "shadow"),
             (Glyph.Mid, t("app_volume"), "app_volume"),
             (Glyph.Wifi, t("network"), "network"),
             (Glyph.Sun, t("weather"), "weather"),
@@ -5999,3 +6016,16 @@ class MainWindow(Gtk.Window):
             btn_label = "Проверить снова"
 
         draw_text(cr, btn_label, btn_x + btn_w / 2.0, btn_y + btn_h / 2.0, font_size=13.0, bold=True, color=COLOR_WHITE, alpha=alpha, align="center", valign="center")
+
+
+def remove_shadow() -> None:
+    """Disable shadow globally for Dynamic Island."""
+    Settings.shadow = False
+    Settings.save_now()
+
+
+def set_shadow(enabled: bool) -> None:
+    """Set shadow state globally for Dynamic Island."""
+    Settings.shadow = bool(enabled)
+    Settings.save_now()
+

@@ -292,6 +292,22 @@ class _SettingsMeta(type):
         cls.rim = value
 
     @property
+    def shadow(cls) -> bool:
+        return cls._get_bool("shadow", True)
+
+    @shadow.setter
+    def shadow(cls, value: bool) -> None:
+        cls._set("shadow", bool(value))
+
+    @property
+    def Shadow(cls) -> bool:
+        return cls.shadow
+
+    @Shadow.setter
+    def Shadow(cls, value: bool) -> None:
+        cls.shadow = value
+
+    @property
     def app_volume(cls) -> bool:
         return cls._get_bool("app_volume", True)
 
@@ -814,6 +830,16 @@ class Settings(metaclass=_SettingsMeta):
     _data: dict[str, Any] = {}
     _loaded: bool = False
     _listeners: list[Callable[[str, Any], None]] = []
+
+    @classmethod
+    def remove_shadow(cls) -> None:
+        cls.shadow = False
+        cls.save_now()
+
+    @classmethod
+    def set_shadow(cls, enabled: bool) -> None:
+        cls.shadow = bool(enabled)
+        cls.save_now()
 
     @classmethod
     def load(cls) -> None:

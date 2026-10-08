@@ -66,6 +66,7 @@ class ConfigService:
             "material",
             "align",
             "rim",
+            "shadow",
             "accent",
             # Lyrics & Anim
             "lyrics",

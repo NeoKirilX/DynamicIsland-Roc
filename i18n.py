@@ -74,6 +74,10 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "ru": "Ободок острова", "en": "Island rim", "es": "Borde de isla", "de": "Inselrand",
         "fr": "Bordure de l'île", "it": "Bordo isola", "pt": "Borda da ilha", "zh": "岛屿光环", "ja": "アイランドの縁", "uk": "Обід острова"
     },
+    "shadow": {
+        "ru": "Тень острова", "en": "Island shadow", "es": "Sombra de isla", "de": "Inselschatten",
+        "fr": "Ombre de l'île", "it": "Ombra isola", "pt": "Sombra da ilha", "zh": "岛屿阴影", "ja": "アイランドの影", "uk": "Тінь острова"
+    },
     "app_volume": {
         "ru": "Громкость приложения", "en": "App volume", "es": "Volumen de app", "de": "App-Lautstärke",
         "fr": "Volume d'application", "it": "Volume applicazione", "pt": "Volume do aplicativo", "zh": "应用独立音量", "ja": "アプリ音量", "uk": "Гучність програми"

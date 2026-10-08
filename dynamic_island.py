@@ -274,6 +274,11 @@ def main() -> int:
         help="Start with an active timer countdown of N seconds (e.g. --timer 90)",
     )
     parser.add_argument(
+        "--no-shadow",
+        action="store_true",
+        help="Disable the shadow under the dynamic island",
+    )
+    parser.add_argument(
         "--verbose",
         action="store_true",
         help="Print diagnostic output to terminal instead of running silently",
@@ -363,6 +368,10 @@ def main() -> int:
             sys.path.insert(0, str(p))
 
     from main_window import MainWindow
+    from settings import Settings
+
+    if args.no_shadow:
+        Settings.shadow = False
 
     try:
         subprocess.run(["killall", "-q", "pactl"], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
