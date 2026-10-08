@@ -138,22 +138,25 @@ class DotMatrix:
 
         base_y = py + ph - bottom_margin
 
-        # Unlit dots background with vertical opacity fade
+        # Unlit dots background with vertical opacity fade - batched per row for maximum FPS
         base_unlit = (UNLIT_OPACITY * 0.7 if compact else UNLIT_OPACITY) * alpha * user_opacity
-        for c in range(n_cols):
-            cx = px + side_inset + (c + 0.5) * step_x
-            for r in range(rows):
-                cy = base_y - r * row_pitch
-                if not _is_inside_rounded_rect(cx, cy, px, py, pw, ph, rad, clearance=dot_rad + 1.0):
-                    continue
-                fade = (1.0 - fade_strength * (float(r) / max(1.0, float(rows - 1)))) if (fade_enabled and rows > 1) else 1.0
-                cr.set_source_rgba(1.0, 1.0, 1.0, base_unlit * fade)
+        for r in range(rows):
+            fade = (1.0 - fade_strength * (float(r) / max(1.0, float(rows - 1)))) if (fade_enabled and rows > 1) else 1.0
+            row_alpha = base_unlit * fade
+            if row_alpha <= 0.001:
+                continue
+            cy = base_y - r * row_pitch
+            cr.set_source_rgba(1.0, 1.0, 1.0, row_alpha)
+            for c in range(n_cols):
+                cx = px + side_inset + (c + 0.5) * step_x
+                cr.new_sub_path()
                 cr.arc(cx, cy, dot_rad, 0, 2.0 * math.pi)
-                cr.fill()
+            cr.fill()
 
         if levels and len(levels) > 0:
             n_levels = len(levels)
             middle = (n_cols - 1) / 2.0
+            eff_lit_base = (LIT_OPACITY * 0.8 if compact else LIT_OPACITY) * user_opacity
             for c in range(n_cols):
                 share = abs(c - middle) / middle if middle > 0 else 0.5
                 # Center-focused bass mapping with smooth interpolation across frequency bands
@@ -174,14 +177,11 @@ class DotMatrix:
                     if diff <= 0.01:
                         break
                     cy = base_y - r * row_pitch
-                    if not _is_inside_rounded_rect(cx, cy, px, py, pw, ph, rad, clearance=dot_rad + 1.0):
-                        continue
                     on = max(0.0, min(1.0, diff))
                     head = on * (1.0 - max(0.0, min(1.0, diff - 1.0)))
 
                     fade = (1.0 - fade_strength * (float(r) / max(1.0, float(rows - 1)))) if (fade_enabled and rows > 1) else 1.0
-                    eff_lit = (LIT_OPACITY * 0.8 if compact else LIT_OPACITY) * user_opacity
-                    cr.set_source_rgba(color[0], color[1], color[2], eff_lit * on * alpha * fade)
+                    cr.set_source_rgba(color[0], color[1], color[2], eff_lit_base * on * alpha * fade)
                     cr.arc(cx, cy, dot_rad, 0, 2.0 * math.pi)
                     cr.fill()
 

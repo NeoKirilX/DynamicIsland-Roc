@@ -22,6 +22,9 @@ class Spring:
         self.damping = float(damping)
 
     def advance(self, dt: float) -> bool:
+        if self.value == self.target and self.velocity == 0.0:
+            return False
+
         while dt > 0.0:
             h = min(self.STEP, dt)
             accel = (

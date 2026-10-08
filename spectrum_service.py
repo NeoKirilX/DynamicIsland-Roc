@@ -467,7 +467,7 @@ noise_reduction = 30
                 continue
 
             try:
-                raw_bytes = self._proc.stdout.read(bytes_to_read)
+                raw_bytes = os.read(self._proc.stdout.fileno(), bytes_to_read)
             except Exception:
                 raw_bytes = b""
 
@@ -481,17 +481,21 @@ noise_reduction = 30
                 chunk_peak = float(np.max(np.abs(samples))) if len(samples) > 0 else 0.0
                 self._push_samples(samples)
 
-                with self._lock:
-                    self._peak = max(chunk_peak, self._peak * 0.92)
-                    if chunk_peak > 1e-4:
+                if chunk_peak > 1e-4:
+                    window = self._get_ordered_window()
+                    computed = self._analyzer.analyze(window)
+                    computed_bands = [float(b) for b in computed]
+                    with self._lock:
+                        self._peak = max(chunk_peak, self._peak * 0.92)
                         self._is_silent = False
                         self._last_data_time = now
-                        window = self._get_ordered_window()
-                        computed = self._analyzer.analyze(window)
-                        self._bands = [float(b) for b in computed]
-                    elif now - self._last_data_time > self.SILENCE_SEC:
-                        self._is_silent = True
-                        self._bands = [0.0] * BANDS
+                        self._bands = computed_bands
+                else:
+                    with self._lock:
+                        self._peak = max(chunk_peak, self._peak * 0.92)
+                        if now - self._last_data_time > self.SILENCE_SEC:
+                            self._is_silent = True
+                            self._bands = [0.0] * BANDS
 
 if __name__ == "__main__":
     print("Testing SpectrumAnalyzer and SpectrumService...")

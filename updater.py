@@ -17,7 +17,7 @@ logger = logging.getLogger(__name__)
 
 REPO_OWNER = "NeoKirilX"
 REPO_NAME = "DynamicIsland-Roc"
-CURRENT_VERSION = "1.0.7"
+CURRENT_VERSION = "1.0.8"
 API_URL = f"https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/releases/latest"
 
 class UpdateState:
@@ -54,6 +54,10 @@ class Updater:
     def add_callback(self, cb: Callable[[], None]) -> None:
         if cb not in self._callbacks:
             self._callbacks.append(cb)
+
+    def remove_callback(self, cb: Callable[[], None]) -> None:
+        if cb in self._callbacks:
+            self._callbacks.remove(cb)
 
     def _notify(self) -> None:
         for cb in self._callbacks:
@@ -164,6 +168,7 @@ class Updater:
 
             with tempfile.NamedTemporaryFile(delete=False, suffix=".tmp") as tmp_file:
                 tmp_path = tmp_file.name
+                last_notify_t = 0.0
                 for chunk in resp.iter_content(chunk_size=65536):
                     if chunk:
                         tmp_file.write(chunk)
@@ -171,7 +176,10 @@ class Updater:
                         if total > 0:
                             with self._lock:
                                 self.percent = min(1.0, downloaded / float(total))
-                            self._notify()
+                            now = time.monotonic()
+                            if now - last_notify_t >= 0.08:
+                                last_notify_t = now
+                                self._notify()
 
             with self._lock:
                 self.percent = 1.0

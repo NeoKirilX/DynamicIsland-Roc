@@ -101,9 +101,15 @@ def lift_color(rgb: tuple[float, float, float]) -> tuple[float, float, float]:
 def color_distance(c1: tuple[float, float, float], c2: tuple[float, float, float]) -> float:
     return (sum((a - b) ** 2 for a, b in zip(c1, c2))) ** 0.5
 
+_PALETTE_CACHE: dict[str, tuple[list[tuple[float, float, float]], tuple[float, float, float]]] = {}
+
 def extract_dominant_palette(
     image_path: str | Path,
 ) -> tuple[list[tuple[float, float, float]], tuple[float, float, float]]:
+    path_key = str(image_path)
+    if path_key in _PALETTE_CACHE:
+        return _PALETTE_CACHE[path_key]
+
     path_obj = Path(image_path)
     if not path_obj.exists() or path_obj.stat().st_size == 0:
         return list(DEFAULT_PALETTE), DEFAULT_ACCENT
@@ -176,7 +182,12 @@ def extract_dominant_palette(
             tertiary = lift_color(turn_hue(primary_accent, -TURN_DEGREES))
 
         palette = [primary_accent, secondary, dominant_bg, tertiary]
-        return palette, primary_accent
+        result = (palette, primary_accent)
+        if len(_PALETTE_CACHE) > 50:
+            old_k = next(iter(_PALETTE_CACHE))
+            del _PALETTE_CACHE[old_k]
+        _PALETTE_CACHE[path_key] = result
+        return result
 
     except Exception as e:
         logger.warning("Error extracting palette from %s: %s", image_path, e)
@@ -600,13 +611,20 @@ class MediaService:
                 self.changed.remove(fn)
 
     def _notify_changed(self) -> None:
-        with self._lock:
-            callbacks = list(self.changed)
-        for cb in callbacks:
-            try:
-                cb()
-            except Exception as e:
-                logger.error("Error in MediaService callback: %s", e)
+        def _dispatch():
+            with self._lock:
+                callbacks = list(self.changed)
+            for cb in callbacks:
+                try:
+                    cb()
+                except Exception as e:
+                    logger.error("Error in MediaService callback: %s", e)
+            return False
+
+        try:
+            GLib.idle_add(_dispatch)
+        except Exception:
+            _dispatch()
 
     @staticmethod
     def around(color: tuple[float, float, float]) -> list[tuple[float, float, float]]:
@@ -672,8 +690,9 @@ class MediaService:
 
     def _worker_loop(self) -> None:
         self._context.push_thread_default()
+        self._signal_subs: list[int] = []
         try:
-            self._bus.signal_subscribe(
+            self._signal_subs.append(self._bus.signal_subscribe(
                 "org.freedesktop.DBus",
                 "org.freedesktop.DBus",
                 "NameOwnerChanged",
@@ -682,9 +701,9 @@ class MediaService:
                 Gio.DBusSignalFlags.NONE,
                 self._on_name_owner_changed,
                 None,
-            )
+            ))
 
-            self._bus.signal_subscribe(
+            self._signal_subs.append(self._bus.signal_subscribe(
                 None,
                 "org.freedesktop.DBus.Properties",
                 "PropertiesChanged",
@@ -693,9 +712,9 @@ class MediaService:
                 Gio.DBusSignalFlags.NONE,
                 self._on_properties_changed,
                 None,
-            )
+            ))
 
-            self._bus.signal_subscribe(
+            self._signal_subs.append(self._bus.signal_subscribe(
                 None,
                 "org.mpris.MediaPlayer2.Player",
                 "Seeked",
@@ -704,7 +723,7 @@ class MediaService:
                 Gio.DBusSignalFlags.NONE,
                 self._on_seeked,
                 None,
-            )
+            ))
 
             self._poll_source = GLib.timeout_source_new(500)
             self._poll_source.set_callback(self._on_poll_timer)
@@ -1282,19 +1301,26 @@ class MediaService:
                         session.art_path = str(target_path)
 
                 cur_sess = self._players.get(self._current_player) if self._current_player else None
-                if (
+                should_update_palette = bool(
                     cur_sess
                     and cur_sess.art_url == url
                     and (not expected_title or (cur_sess.title == expected_title and cur_sess.artist == expected_artist))
-                ):
+                )
+                if should_update_palette:
                     self._art_path = str(target_path)
-                    self._palette, self._accent = extract_dominant_palette(target_path)
-                    GLib.idle_add(self._notify_changed)
+
+            if should_update_palette:
+                pal, acc = extract_dominant_palette(target_path)
+                with self._lock:
+                    self._palette, self._accent = pal, acc
+                self._notify_changed()
         except Exception as e:
             logger.debug("Async cover download failed for %s: %s", url, e)
             with self._lock:
                 self._in_flight_urls.discard(url)
                 self._failed_urls.add(url)
+                if len(self._failed_urls) > 200:
+                    self._failed_urls.pop()
 
     def _resolve_session_art(self, session: PlayerSession) -> None:
         if session.art_path and Path(session.art_path).is_file():
@@ -1742,54 +1768,53 @@ class MediaService:
             track_id = session.track_id if session else None
             player = self._current_player
             target_sec = max(0.0, min(self._duration, float(position_seconds)))
+            self._position = target_sec
+            self._position_at = time.monotonic()
+            if session:
+                session.position = target_sec
+                session.position_at = self._position_at
 
         target_us = int(target_sec * 1_000_000)
-        success = False
 
-        if track_id and isinstance(track_id, str) and track_id.startswith("/"):
-            try:
-                self._bus.call_sync(
-                    player,
-                    "/org/mpris/MediaPlayer2",
-                    "org.mpris.MediaPlayer2.Player",
-                    "SetPosition",
-                    GLib.Variant("(ox)", (track_id, target_us)),
-                    None,
-                    Gio.DBusCallFlags.NONE,
-                    1200,
-                    None,
-                )
-                success = True
-            except Exception as e:
-                logger.debug("SetPosition failed, trying Seek: %s", e)
+        def _seek_worker():
+            success = False
+            if track_id and isinstance(track_id, str) and track_id.startswith("/"):
+                try:
+                    self._bus.call_sync(
+                        player,
+                        "/org/mpris/MediaPlayer2",
+                        "org.mpris.MediaPlayer2.Player",
+                        "SetPosition",
+                        GLib.Variant("(ox)", (track_id, target_us)),
+                        None,
+                        Gio.DBusCallFlags.NONE,
+                        1200,
+                        None,
+                    )
+                    success = True
+                except Exception as e:
+                    logger.debug("SetPosition failed, trying Seek: %s", e)
 
-        if not success:
-            current_sec = self.position
-            offset_us = int((target_sec - current_sec) * 1_000_000)
-            try:
-                self._bus.call_sync(
-                    player,
-                    "/org/mpris/MediaPlayer2",
-                    "org.mpris.MediaPlayer2.Player",
-                    "Seek",
-                    GLib.Variant("(x)", (offset_us,)),
-                    None,
-                    Gio.DBusCallFlags.NONE,
-                    1200,
-                    None,
-                )
-                success = True
-            except Exception as e:
-                logger.warning("Seek failed on %s: %s", player, e)
+            if not success:
+                current_sec = self.position
+                offset_us = int((target_sec - current_sec) * 1_000_000)
+                try:
+                    self._bus.call_sync(
+                        player,
+                        "/org/mpris/MediaPlayer2",
+                        "org.mpris.MediaPlayer2.Player",
+                        "Seek",
+                        GLib.Variant("(x)", (offset_us,)),
+                        None,
+                        Gio.DBusCallFlags.NONE,
+                        1200,
+                        None,
+                    )
+                except Exception as e:
+                    logger.warning("Seek failed on %s: %s", player, e)
 
-        if success:
-            with self._lock:
-                self._position = target_sec
-                self._position_at = time.monotonic()
-                if session:
-                    session.position = target_sec
-                    session.position_at = self._position_at
-            self._notify_changed()
+        threading.Thread(target=_seek_worker, daemon=True, name="MediaSeekWorker").start()
+        self._notify_changed()
 
     def seek_fraction(self, fraction: float) -> None:
         with self._lock:
@@ -1804,25 +1829,29 @@ class MediaService:
             return
 
         level_val = max(0.0, min(1.0, float(level)))
-        try:
-            self._bus.call_sync(
-                player,
-                "/org/mpris/MediaPlayer2",
-                "org.freedesktop.DBus.Properties",
-                "Set",
-                GLib.Variant("(ssv)", ("org.mpris.MediaPlayer2.Player", "Volume", GLib.Variant("d", level_val))),
-                None,
-                Gio.DBusCallFlags.NONE,
-                1000,
-                None,
-            )
-            with self._lock:
-                self._volume = level_val
-                if player in self._players:
-                    self._players[player].volume = level_val
-            self._notify_changed()
-        except Exception as e:
-            logger.debug("Failed setting volume: %s", e)
+        with self._lock:
+            self._volume = level_val
+            if player in self._players:
+                self._players[player].volume = level_val
+        self._notify_changed()
+
+        def _vol_worker():
+            try:
+                self._bus.call_sync(
+                    player,
+                    "/org/mpris/MediaPlayer2",
+                    "org.freedesktop.DBus.Properties",
+                    "Set",
+                    GLib.Variant("(ssv)", ("org.mpris.MediaPlayer2.Player", "Volume", GLib.Variant("d", level_val))),
+                    None,
+                    Gio.DBusCallFlags.NONE,
+                    1000,
+                    None,
+                )
+            except Exception as e:
+                logger.debug("Failed setting volume: %s", e)
+
+        threading.Thread(target=_vol_worker, daemon=True, name="MediaVolumeWorker").start()
 
     def raise_player(self) -> None:
         with self._lock:
@@ -1832,85 +1861,98 @@ class MediaService:
             identity = session.identity if session else ""
             title = self._title
 
-        if player:
-            try:
-                self._bus.call_sync(
-                    player,
-                    "/org/mpris/MediaPlayer2",
-                    "org.mpris.MediaPlayer2",
-                    "Raise",
-                    None,
-                    None,
-                    Gio.DBusCallFlags.NONE,
-                    1000,
-                    None,
-                )
-            except Exception as e:
-                logger.debug("D-Bus Raise failed: %s", e)
+        def _raise_worker():
+            if player:
+                try:
+                    self._bus.call_sync(
+                        player,
+                        "/org/mpris/MediaPlayer2",
+                        "org.mpris.MediaPlayer2",
+                        "Raise",
+                        None,
+                        None,
+                        Gio.DBusCallFlags.NONE,
+                        1000,
+                        None,
+                    )
+                except Exception as e:
+                    logger.debug("D-Bus Raise failed: %s", e)
 
-        if shutil.which("hyprctl"):
-            try:
-                res = subprocess.run(
-                    ["hyprctl", "clients", "-j"],
-                    capture_output=True,
-                    text=True,
-                    timeout=1.5,
-                    check=False,
-                )
-                if res.returncode == 0 and res.stdout:
-                    clients = json.loads(res.stdout)
-                    matched_addr: Optional[str] = None
-                    matched_class: Optional[str] = None
+            if shutil.which("hyprctl"):
+                try:
+                    res = subprocess.run(
+                        ["hyprctl", "clients", "-j"],
+                        capture_output=True,
+                        text=True,
+                        timeout=1.5,
+                        check=False,
+                    )
+                    if res.returncode == 0 and res.stdout:
+                        clients = json.loads(res.stdout)
+                        matched_addr: Optional[str] = None
+                        matched_class: Optional[str] = None
 
-                    player_clean = player.split(".")[-1].lower() if player else ""
-                    targets = [
-                        t.lower()
-                        for t in (desktop_entry, player_clean, identity)
-                        if t
-                    ]
+                        player_clean = player.split(".")[-1].lower() if player else ""
+                        targets = [
+                            t.lower()
+                            for t in (desktop_entry, player_clean, identity)
+                            if t
+                        ]
 
-                    for c in clients:
-                        cls = c.get("class", "").lower()
-                        initial_cls = c.get("initialClass", "").lower()
-                        win_title = c.get("title", "").lower()
-                        addr = c.get("address")
+                        for c in clients:
+                            cls = c.get("class", "").lower()
+                            initial_cls = c.get("initialClass", "").lower()
+                            win_title = c.get("title", "").lower()
+                            addr = c.get("address")
 
-                        for t in targets:
-                            if t in cls or t in initial_cls:
+                            for t in targets:
+                                if t in cls or t in initial_cls:
+                                    matched_addr = addr
+                                    matched_class = c.get("class")
+                                    break
+                            if matched_addr:
+                                break
+
+                            if title and title.lower() in win_title:
                                 matched_addr = addr
                                 matched_class = c.get("class")
                                 break
-                        if matched_addr:
-                            if title and title.lower() in win_title:
-                                break
 
-                    if matched_addr:
-                        subprocess.run(
-                            ["hyprctl", "dispatch", "focuswindow", f"address:{matched_addr}"],
-                            capture_output=True,
-                            timeout=1.0,
-                            check=False,
-                        )
-                    elif matched_class:
-                        subprocess.run(
-                            ["hyprctl", "dispatch", "focuswindow", f"class:{matched_class}"],
-                            capture_output=True,
-                            timeout=1.0,
-                            check=False,
-                        )
-                    elif desktop_entry:
-                        subprocess.run(
-                            ["hyprctl", "dispatch", "focuswindow", f"class:{desktop_entry}"],
-                            capture_output=True,
-                            timeout=1.0,
-                            check=False,
-                        )
-            except Exception as e:
-                logger.debug("Hyprland focuswindow dispatch failed: %s", e)
+                        if matched_addr:
+                            subprocess.run(
+                                ["hyprctl", "dispatch", "focuswindow", f"address:{matched_addr}"],
+                                capture_output=True,
+                                timeout=1.0,
+                                check=False,
+                            )
+                        elif matched_class:
+                            subprocess.run(
+                                ["hyprctl", "dispatch", "focuswindow", f"class:{matched_class}"],
+                                capture_output=True,
+                                timeout=1.0,
+                                check=False,
+                            )
+                        elif desktop_entry:
+                            subprocess.run(
+                                ["hyprctl", "dispatch", "focuswindow", f"class:{desktop_entry}"],
+                                capture_output=True,
+                                timeout=1.0,
+                                check=False,
+                            )
+                except Exception as e:
+                    logger.debug("Hyprland focuswindow dispatch failed: %s", e)
+
+        threading.Thread(target=_raise_worker, daemon=True, name="MediaRaiseWorker").start()
 
     def close(self) -> None:
         self._running = False
         self._cancel_active_ytdlp()
+        for sub_id in getattr(self, "_signal_subs", []):
+            try:
+                self._bus.signal_unsubscribe(sub_id)
+            except Exception:
+                pass
+        self._signal_subs = []
         if hasattr(self, "_poll_source") and self._poll_source:
             try:
                 self._poll_source.destroy()

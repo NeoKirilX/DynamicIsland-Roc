@@ -149,23 +149,31 @@ class Alarm:
 
     def stop(self) -> None:
         self._stop_event.set()
+        self._is_ringing = False
         with self._lock:
-            if self._proc is not None:
+            proc = self._proc
+            self._proc = None
+            th = self._thread
+            self._thread = None
+
+        def _cleanup_worker():
+            if proc is not None:
                 try:
-                    if self._proc.poll() is None:
-                        self._proc.terminate()
+                    if proc.poll() is None:
+                        proc.terminate()
                         try:
-                            self._proc.wait(timeout=0.2)
+                            proc.wait(timeout=0.2)
                         except subprocess.TimeoutExpired:
-                            self._proc.kill()
+                            proc.kill()
                 except Exception:
                     pass
-                self._proc = None
-        self._is_ringing = False
-        if self._thread is not None and self._thread.is_alive():
-            if threading.current_thread() != self._thread:
-                self._thread.join(timeout=0.5)
-            self._thread = None
+            if th is not None and th.is_alive() and threading.current_thread() != th:
+                try:
+                    th.join(timeout=0.5)
+                except Exception:
+                    pass
+
+        threading.Thread(target=_cleanup_worker, daemon=True, name="AlarmCleanupWorker").start()
 
 if __name__ == "__main__":
     print("Testing alarm.Alarm & timer_service integration...")

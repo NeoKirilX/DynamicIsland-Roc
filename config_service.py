@@ -129,7 +129,7 @@ class ConfigService:
             data = {
                 "magic": DNI_MAGIC,
                 "version": DNI_VERSION,
-                "app_version": "1.0.7",
+                "app_version": "1.0.8",
                 "timestamp": int(time.time()),
                 "exported_at": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                 "name": name,

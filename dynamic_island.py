@@ -301,7 +301,7 @@ def main() -> int:
     parser.add_argument(
         "--version",
         action="version",
-        version="DynamicIsland-Roc 1.0.7",
+        version="DynamicIsland-Roc 1.0.8",
     )
 
     args = parser.parse_args()

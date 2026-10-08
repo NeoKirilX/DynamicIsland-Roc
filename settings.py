@@ -851,14 +851,14 @@ class Settings(metaclass=_SettingsMeta):
                 cls._save_timer.cancel()
                 cls._save_timer = None
             data_to_write = dict(cls._data)
-        try:
-            CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-            tmp_file = CONFIG_FILE.with_suffix(".tmp")
-            with open(tmp_file, "w", encoding="utf-8") as f:
-                json.dump(data_to_write, f, indent=2)
-            tmp_file.replace(CONFIG_FILE)
-        except Exception as e:
-            logger.error("Failed saving settings to %s: %s", CONFIG_FILE, e)
+            try:
+                CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+                tmp_file = CONFIG_FILE.with_suffix(f".tmp.{os.getpid()}_{threading.get_ident()}")
+                with open(tmp_file, "w", encoding="utf-8") as f:
+                    json.dump(data_to_write, f, indent=2)
+                tmp_file.replace(CONFIG_FILE)
+            except Exception as e:
+                logger.error("Failed saving settings to %s: %s", CONFIG_FILE, e)
 
     @classmethod
     def _ensure_loaded(cls) -> None:

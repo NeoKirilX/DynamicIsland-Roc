@@ -121,7 +121,7 @@ class Shelf:
 
     def _generate_thumbnails(self, items: list[ShelfItem]) -> None:
         image_exts = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif", ".svg"}
-        changed = False
+        updates: list[tuple[ShelfItem, Optional[cairo.ImageSurface], Optional[bytearray], bool]] = []
         for item in items:
             if item.is_config:
                 try:
@@ -150,9 +150,7 @@ class Shelf:
                     cr.set_source_rgba(1.0, 1.0, 1.0, 0.95)
                     cr.move_to(38.0, 84.0)
                     cr.show_text(".DNI")
-                    item.surface = surf
-                    item.photo = True
-                    changed = True
+                    updates.append((item, surf, None, True))
                 except Exception:
                     pass
                 continue
@@ -167,19 +165,24 @@ class Shelf:
                         data = bytearray(img.tobytes("raw", "BGRA"))
                         stride = cairo.ImageSurface.format_stride_for_width(cairo.FORMAT_ARGB32, w)
                         surf = cairo.ImageSurface.create_for_data(data, cairo.FORMAT_ARGB32, w, h, stride)
-                        item._data = data
-                        item.surface = surf
-                        item.photo = True
-                        changed = True
+                        updates.append((item, surf, data, True))
                 except Exception:
-                    item.surface = None
-                    item.photo = False
-        if changed:
+                    updates.append((item, None, None, False))
+
+        if updates:
+            def _apply():
+                for it, s, d, photo in updates:
+                    it._data = d
+                    it.surface = s
+                    it.photo = photo
+                self._notify()
+                return False
+
             try:
                 from gi.repository import GLib
-                GLib.idle_add(self._notify)
+                GLib.idle_add(_apply)
             except Exception:
-                self._notify()
+                _apply()
 
     def open_item(self, item: ShelfItem) -> None:
         if not os.path.exists(item.path):

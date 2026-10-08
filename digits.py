@@ -18,6 +18,8 @@ class _Cell:
         self.is_animating: bool = False
         self.down: bool = True
 
+_DIGIT_ADVANCE_CACHE: dict[tuple[str, bool, float], float] = {}
+
 class Digits:
 
     LEAVE_DURATION: float = 0.26
@@ -163,9 +165,13 @@ class Digits:
 
         travel = max(1.0, round(font_size * 0.5))
 
-        digit_advance = max(
-            cr.text_extents(str(d)).x_advance for d in range(10)
-        )
+        cache_key = (self.font_family or "sans-serif", round(float(font_size), 2))
+        digit_advance = _DIGIT_ADVANCE_CACHE.get(cache_key)
+        if digit_advance is None:
+            digit_advance = max(
+                cr.text_extents(str(d)).x_advance for d in range(10)
+            )
+            _DIGIT_ADVANCE_CACHE[cache_key] = digit_advance
 
         cell_widths: list[float] = []
         for cell in self._cells:

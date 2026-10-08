@@ -9,6 +9,7 @@ import math
 import os
 import re
 import sys
+import threading
 import time
 import urllib.parse
 from enum import Enum, auto
@@ -47,7 +48,7 @@ from icon import Glyph, render_battery, render_icon
 from lyric import LyricLine, is_wordless, measure_text, render_wait, select_font
 from lyrics_service import LyricsService
 from media_service import MediaService, clean_track_title, format_display_title
-from native_wayland import is_ctrl_down, is_fullscreen, query_do_not_disturb
+from native_wayland import FullscreenWatcher, is_ctrl_down, is_fullscreen, query_do_not_disturb
 from network_service import Link, NetworkService, State
 from ring import Ring
 from row_list import RowList
@@ -303,29 +304,46 @@ def draw_rounded_rect(
     cr.arc(x + r, y + r, r, math.pi, 3.0 * math.pi / 2.0)
     cr.close_path()
 
+_TEXT_TRUNCATE_CACHE: dict[tuple[str, float, bool, float], str] = {}
+
 def draw_text(
     cr: cairo.Context,
     text: str,
     x: float,
     y: float,
-    font_size: float = 13.5,
+    font_size: float = 14.0,
     bold: bool = False,
-    color: tuple = (1.0, 1.0, 1.0),
+    color: tuple = COLOR_WHITE,
     alpha: float = 1.0,
     align: str = "left",
     valign: str = "center",
     max_w: Optional[float] = None,
 ) -> float:
-    if not text or alpha <= 0.0:
+    if not text:
         return 0.0
     select_font(cr, font_size=font_size * Settings.text_factor(), bold=bold)
     disp = text
     if max_w is not None and max_w > 0:
-        ext = cr.text_extents(disp)
-        if ext.width > max_w:
-            while len(disp) > 1 and cr.text_extents(disp + "…").width > max_w:
-                disp = disp[:-1]
-            disp += "…"
+        trunc_key = (text, round(font_size * Settings.text_factor(), 1), bold, round(max_w, 1))
+        cached_disp = _TEXT_TRUNCATE_CACHE.get(trunc_key)
+        if cached_disp is not None:
+            disp = cached_disp
+        else:
+            if cr.text_extents(disp).width > max_w:
+                low, high = 1, len(text)
+                best = 1
+                while low <= high:
+                    mid = (low + high) // 2
+                    candidate = text[:mid] + "…"
+                    if cr.text_extents(candidate).width <= max_w:
+                        best = mid
+                        low = mid + 1
+                    else:
+                        high = mid - 1
+                disp = text[:best] + "…"
+            if len(_TEXT_TRUNCATE_CACHE) > 200:
+                _TEXT_TRUNCATE_CACHE.clear()
+            _TEXT_TRUNCATE_CACHE[trunc_key] = disp
     ext = cr.text_extents(disp)
     draw_x = x
     if align == "center":
@@ -363,7 +381,11 @@ def markdown_to_pango_markup(text: str) -> str:
     escaped = re.sub(r"~~(.+?)~~", r"<s>\1</s>", escaped)
     return escaped
 
-def get_cache_size_str() -> str:
+_CACHED_CACHE_SIZE_STR = "0 КБ"
+_LAST_CACHE_CALC_TIME = 0.0
+
+def _calc_cache_size_worker() -> None:
+    global _CACHED_CACHE_SIZE_STR
     total_bytes = 0
     from media_service import COVER_CACHE_DIR
     from lyrics_service import LYRICS_CACHE_DIR
@@ -376,24 +398,49 @@ def get_cache_size_str() -> str:
                     except Exception:
                         pass
     if total_bytes < 1024:
-        return "0 КБ"
+        res = "0 КБ"
     elif total_bytes < 1024 * 1024:
-        return f"{total_bytes / 1024:.0f} КБ"
+        res = f"{total_bytes / 1024:.0f} КБ"
     else:
-        return f"{total_bytes / (1024 * 1024):.1f} МБ"
+        res = f"{total_bytes / (1024 * 1024):.1f} МБ"
+    _CACHED_CACHE_SIZE_STR = res
+
+def refresh_cache_size_async() -> None:
+    global _LAST_CACHE_CALC_TIME
+    now = time.monotonic()
+    if now - _LAST_CACHE_CALC_TIME < 5.0:
+        return
+    _LAST_CACHE_CALC_TIME = now
+    threading.Thread(target=_calc_cache_size_worker, daemon=True, name="CacheSizeWorker").start()
+
+def get_cache_size_str() -> str:
+    refresh_cache_size_async()
+    return _CACHED_CACHE_SIZE_STR
 
 def clear_all_cache() -> None:
-    from media_service import COVER_CACHE_DIR
-    from lyrics_service import LYRICS_CACHE_DIR
-    for d in (COVER_CACHE_DIR, LYRICS_CACHE_DIR):
-        if d.is_dir():
-            for p in d.rglob("*"):
-                if p.is_file():
-                    try:
-                        p.unlink()
-                    except Exception:
-                        pass
+    global _CACHED_CACHE_SIZE_STR
+    _CACHED_CACHE_SIZE_STR = "0 КБ"
+    for _, (surf, _) in list(_IMAGE_SURFACE_CACHE.items()):
+        try:
+            surf.finish()
+        except Exception:
+            pass
     _IMAGE_SURFACE_CACHE.clear()
+
+    def _worker():
+        from media_service import COVER_CACHE_DIR
+        from lyrics_service import LYRICS_CACHE_DIR
+        for d in (COVER_CACHE_DIR, LYRICS_CACHE_DIR):
+            if d.is_dir():
+                for p in d.rglob("*"):
+                    if p.is_file():
+                        try:
+                            p.unlink()
+                        except Exception:
+                            pass
+        _calc_cache_size_worker()
+
+    threading.Thread(target=_worker, daemon=True, name="ClearCacheWorker").start()
 
 _IMAGE_SURFACE_CACHE: dict[str, tuple[cairo.ImageSurface, bytearray]] = {}
 _MEASURE_SURFACE = cairo.ImageSurface(cairo.FORMAT_ARGB32, 1, 1)
@@ -412,13 +459,21 @@ def load_cairo_image(path: Optional[str]) -> Optional[cairo.ImageSurface]:
             top = (pil_img.height - min_dim) // 2
             pil_img = pil_img.crop((left, top, left + min_dim, top + min_dim))
 
+        # Downsample large covers to thumbnail (256x256 max) to save hundreds of MBs
+        if pil_img.width > 256 or pil_img.height > 256:
+            pil_img.thumbnail((256, 256), Image.Resampling.LANCZOS)
+
         raw = bytearray(pil_img.tobytes("raw", "BGRA"))
         stride = cairo.ImageSurface.format_stride_for_width(cairo.FORMAT_ARGB32, pil_img.width)
         surf = cairo.ImageSurface.create_for_data(raw, cairo.FORMAT_ARGB32, pil_img.width, pil_img.height, stride)
         _IMAGE_SURFACE_CACHE[path] = (surf, raw)
         if len(_IMAGE_SURFACE_CACHE) > 30:
             old_k = next(iter(_IMAGE_SURFACE_CACHE))
-            del _IMAGE_SURFACE_CACHE[old_k]
+            old_surf, _ = _IMAGE_SURFACE_CACHE.pop(old_k)
+            try:
+                old_surf.finish()
+            except Exception:
+                pass
         return surf
     except Exception as exc:
         logger.debug("Failed loading cairo image from %s: %s", path, exc)
@@ -485,6 +540,10 @@ class MainWindow(Gtk.Window):
         self._alarm = Alarm()
         self._weather = WeatherService(on_changed=self.on_weather_changed)
         self._system = SystemService()
+        self._fullscreen_watcher = FullscreenWatcher(
+            on_fullscreen_changed=lambda fs: GLib.idle_add(self._on_fullscreen_changed, fs),
+            auto_start=True,
+        )
 
         self._goo = Goo()
         self._cover_small = Cover()
@@ -616,7 +675,8 @@ class MainWindow(Gtk.Window):
         self._bell_angle: float = 0.0
 
         self._updater = Updater.get()
-        self._updater.add_callback(lambda: GLib.idle_add(self.area.queue_draw))
+        self._update_cb = lambda: GLib.idle_add(self.area.queue_draw)
+        self._updater.add_callback(self._update_cb)
         self._btn_update_rect: tuple[float, float, float, float] = (0.0, 0.0, 0.0, 0.0)
 
         # Timer dynamic button hitboxes
@@ -771,7 +831,7 @@ class MainWindow(Gtk.Window):
         self._setup_controllers()
 
         self._tick_cb_id = self.area.add_tick_callback(self.on_frame_tick)
-        GLib.timeout_add(100, self.on_periodic_tick)
+        self._periodic_source_id = GLib.timeout_add(100, self.on_periodic_tick)
 
         self._ready = True
         GLib.idle_add(self._initial_media_sync, None)
@@ -1337,11 +1397,13 @@ class MainWindow(Gtk.Window):
                 ry = row_y_start + idx * row_h
                 if px + 10 <= lx <= px + pw - 10 and ry <= ly < ry + row_h:
                     hovered = idx
-                    self._row_list_menu.move_to(ry, row_h, idx)
+                    if self._row_list_menu.hover_idx != idx:
+                        self._row_list_menu.move_to(ry, row_h, idx)
+                        self.area.queue_draw()
                     break
-            if hovered is None:
+            if hovered is None and self._row_list_menu.hover_idx is not None:
                 self._row_list_menu.clear_hover()
-            self.area.queue_draw()
+                self.area.queue_draw()
 
         elif self._current_view == View.SETTINGS:
             row_y_start, row_h = self.get_settings_layout(ph)
@@ -1350,11 +1412,13 @@ class MainWindow(Gtk.Window):
                 ry = py + row_y_start + idx * row_h
                 if px + 10 <= lx <= px + pw - 10 and ry <= ly < ry + row_h:
                     hovered = idx
-                    self._row_list_settings.move_to(ry, row_h, idx)
+                    if self._row_list_settings.hover_idx != idx:
+                        self._row_list_settings.move_to(ry, row_h, idx)
+                        self.area.queue_draw()
                     break
-            if hovered is None:
+            if hovered is None and self._row_list_settings.hover_idx is not None:
                 self._row_list_settings.clear_hover()
-            self.area.queue_draw()
+                self.area.queue_draw()
 
         elif self._current_view == View.LOOK:
             row_y_start, row_h, swatch_y = self.get_look_layout(ph)
@@ -1363,11 +1427,13 @@ class MainWindow(Gtk.Window):
                 ry = py + row_y_start + idx * row_h
                 if px + 10 <= lx <= px + pw - 10 and ry <= ly < ry + row_h:
                     hovered = idx
-                    self._row_list_look.move_to(ry, row_h, idx)
+                    if self._row_list_look.hover_idx != idx:
+                        self._row_list_look.move_to(ry, row_h, idx)
+                        self.area.queue_draw()
                     break
-            if hovered is None:
+            if hovered is None and self._row_list_look.hover_idx is not None:
                 self._row_list_look.clear_hover()
-            self.area.queue_draw()
+                self.area.queue_draw()
 
         elif self._current_view == View.TEXT_ANIM:
             row_y_start = 108.0
@@ -1377,11 +1443,13 @@ class MainWindow(Gtk.Window):
                 ry = py + row_y_start + idx * row_h
                 if px + 10 <= lx <= px + pw - 10 and ry <= ly < ry + row_h:
                     hovered = idx
-                    self._row_list_text_anim.move_to(ry, row_h, idx)
+                    if self._row_list_text_anim.hover_idx != idx:
+                        self._row_list_text_anim.move_to(ry, row_h, idx)
+                        self.area.queue_draw()
                     break
-            if hovered is None:
+            if hovered is None and self._row_list_text_anim.hover_idx is not None:
                 self._row_list_text_anim.clear_hover()
-            self.area.queue_draw()
+                self.area.queue_draw()
 
         elif self._current_view == View.COMBO:
             row_y_start = 104.0
@@ -1391,11 +1459,13 @@ class MainWindow(Gtk.Window):
                 ry = py + row_y_start + idx * row_h
                 if px + 10 <= lx <= px + pw - 10 and ry <= ly < ry + row_h:
                     hovered = idx
-                    self._row_list_combo.move_to(ry, row_h, idx)
+                    if self._row_list_combo.hover_idx != idx:
+                        self._row_list_combo.move_to(ry, row_h, idx)
+                        self.area.queue_draw()
                     break
-            if hovered is None:
+            if hovered is None and self._row_list_combo.hover_idx is not None:
                 self._row_list_combo.clear_hover()
-            self.area.queue_draw()
+                self.area.queue_draw()
 
         elif self._current_view == View.EQUALIZER:
             row_y_start = 44.0
@@ -1405,11 +1475,13 @@ class MainWindow(Gtk.Window):
                 ry = py + row_y_start + idx * row_h
                 if px + 10 <= lx <= px + pw - 10 and ry <= ly < ry + row_h:
                     hovered = idx
-                    self._row_list_equalizer.move_to(ry, row_h, idx)
+                    if self._row_list_equalizer.hover_idx != idx:
+                        self._row_list_equalizer.move_to(ry, row_h, idx)
+                        self.area.queue_draw()
                     break
-            if hovered is None:
+            if hovered is None and self._row_list_equalizer.hover_idx is not None:
                 self._row_list_equalizer.clear_hover()
-            self.area.queue_draw()
+                self.area.queue_draw()
 
         elif self._current_view == View.SHELF:
             strip_x = px + 18.0
@@ -2232,7 +2304,9 @@ class MainWindow(Gtk.Window):
         up = dy < 0 or dx < 0
         step = 1 if up else -1
 
-        if is_ctrl_down():
+        mods = controller.get_current_event_state() if hasattr(controller, "get_current_event_state") else 0
+        ctrl_held = bool(mods & Gdk.ModifierType.CONTROL_MASK) if hasattr(Gdk, "ModifierType") else is_ctrl_down()
+        if ctrl_held:
             self.switch_source(-step)
             return True
 
@@ -2868,7 +2942,6 @@ class MainWindow(Gtk.Window):
 
         if self._current_view == View.TEXT_ANIM:
             spd = Settings.lyric_anim_speed / 100.0
-            moving = True
             moving |= self._preview_enter.advance(dt * spd)
             moving |= self._preview_prev_alpha.advance(dt * spd)
             moving |= self._row_list_text_anim.tick(dt)
@@ -2883,10 +2956,10 @@ class MainWindow(Gtk.Window):
                 self._preview_prev_alpha.target = 0.0
                 self._preview_enter.value = 0.0
                 self._preview_enter.target = 1.0
+                moving = True
 
         elif self._current_view == View.COMBO:
             spd = Settings.lyric_anim_speed / 100.0
-            moving = True
             moving |= self._preview_enter.advance(dt * spd)
             moving |= self._preview_prev_alpha.advance(dt * spd)
             moving |= self._row_list_combo.tick(dt)
@@ -2906,6 +2979,7 @@ class MainWindow(Gtk.Window):
                 self._preview_prev_alpha.target = 0.0
                 self._preview_enter.value = 0.0
                 self._preview_enter.target = 1.0
+                moving = True
 
         if self._current_view in (View.MEDIA, View.TOAST, View.MEDIA_BIG):
             bands = self._spectrum.get_bands()
@@ -3168,10 +3242,20 @@ class MainWindow(Gtk.Window):
         surf.set_input_region(reg)
 
     def check_fullscreen(self) -> None:
-        hidden = Settings.hide_fullscreen and is_fullscreen()
+        fs = self._fullscreen_watcher.is_active if hasattr(self, "_fullscreen_watcher") else is_fullscreen()
+        hidden = Settings.hide_fullscreen and fs
         if hidden != self._hidden:
             self._hidden = hidden
             self.set_targets()
+
+    def _on_fullscreen_changed(self, fs: bool) -> bool:
+        if not self._ready:
+            return False
+        hidden = Settings.hide_fullscreen and fs
+        if hidden != self._hidden:
+            self._hidden = hidden
+            self.set_targets()
+        return False
 
     def update_clock(self) -> None:
         now = datetime.datetime.now()
@@ -3270,11 +3354,20 @@ class MainWindow(Gtk.Window):
         self._last_plugged = info.is_plugged
 
     def read_headset(self, device: Optional[Any] = None, announce: bool = False) -> None:
-        level = get_headset_charge()
+        def _worker():
+            try:
+                level = get_headset_charge()
+                GLib.idle_add(self._apply_headset_charge, level, device, announce)
+            except Exception:
+                pass
+        threading.Thread(target=_worker, daemon=True, name="HeadsetQueryWorker").start()
+
+    def _apply_headset_charge(self, level: int, device: Optional[Any], announce: bool) -> bool:
+        if not self._ready:
+            return False
         was = self._headset_pct
         self._headset_pct = level
         known = level >= 0
-        low = known and level <= HEADSET_LOW
 
         if announce:
             dev_name = getattr(device, "name", "Аудиоустройство")
@@ -3282,20 +3375,24 @@ class MainWindow(Gtk.Window):
             self.notify(Glyph.Headphones, COLOR_WHITE, "Аудиоустройство", name)
         elif known and was > HEADSET_LOW and level <= HEADSET_LOW:
             self.notify(Glyph.Headphones, COLOR_RED, "Низкий заряд", f"Наушники · {level}%")
+        return False
 
     def on_network_changed(self, was: State, now: State) -> None:
+        GLib.idle_add(self._apply_network_changed, was, now)
+
+    def _apply_network_changed(self, was: State, now: State) -> bool:
         if not self._ready or not Settings.network:
-            return
+            return False
         if now.vpn != was.vpn:
             if now.vpn:
                 self.notify(Glyph.Vpn, COLOR_GREEN, "VPN включён", now.vpn.splitlines()[0])
             else:
                 self.notify(Glyph.Vpn, COLOR_DIM[:3], "VPN отключён", was.vpn.splitlines()[0])
-            return
+            return False
 
         if now.link == Link.NONE:
             self.notify(Glyph.Offline, COLOR_RED, "Нет сети", "Подключение потеряно")
-            return
+            return False
 
         wifi = now.link == Link.WIFI
         title = "Ethernet" if now.link == Link.WIRED else (now.name if now.name else ("Wi-Fi" if wifi else "Мобильная сеть"))
@@ -3303,6 +3400,7 @@ class MainWindow(Gtk.Window):
             self.notify(Glyph.Wifi if wifi else Glyph.Wired, COLOR_GREEN, title, "Wi-Fi подключён" if wifi else "Сеть подключена")
         else:
             self.notify(Glyph.Wifi if wifi else Glyph.Wired, COLOR_ORANGE, title, "Без доступа к интернету")
+        return False
 
     def on_weather_changed(self, info: WeatherInfo) -> None:
         GLib.idle_add(self._apply_weather_changed, info)
@@ -3329,6 +3427,8 @@ class MainWindow(Gtk.Window):
         self._last_track_key = title
 
         if new_track:
+            self._player_row_waves.clear()
+            self._player_row_dues.clear()
             self._player_lyric_h = PLAYER_LYRIC_ROOM
             self._player_col.value = 0.0
             self._player_col.target = 0.0
@@ -3998,21 +4098,58 @@ class MainWindow(Gtk.Window):
             Settings.save_now()
         except Exception:
             pass
-        for s in ("_network", "_audio", "_media", "_battery", "_spectrum", "_alarm"):
-            srv = getattr(self, s, None)
-            if srv and hasattr(srv, "stop"):
+
+        if getattr(self, "_periodic_source_id", 0):
+            try:
+                GLib.source_remove(self._periodic_source_id)
+            except Exception:
+                pass
+            self._periodic_source_id = 0
+
+        if getattr(self, "_tick_cb_id", 0):
+            try:
+                self.area.remove_tick_callback(self._tick_cb_id)
+            except Exception:
+                pass
+            self._tick_cb_id = 0
+
+        if hasattr(self, "_updater") and hasattr(self, "_update_cb"):
+            try:
+                self._updater.remove_callback(self._update_cb)
+            except Exception:
+                pass
+
+        if hasattr(self, "_fullscreen_watcher") and self._fullscreen_watcher:
+            try:
+                self._fullscreen_watcher.stop()
+            except Exception:
+                pass
+
+        services = [
+            ("_network", "stop"),
+            ("_audio", "close"),
+            ("_media", "close"),
+            ("_battery", "stop"),
+            ("_spectrum", "close"),
+            ("_alarm", "stop"),
+            ("_weather", "stop"),
+            ("_system", "stop"),
+        ]
+        for attr, method in services:
+            srv = getattr(self, attr, None)
+            if srv and hasattr(srv, method):
                 try:
-                    srv.stop()
+                    getattr(srv, method)()
                 except Exception:
                     pass
+
         super().destroy()
 
     def exit_island(self) -> None:
         try:
-            Settings.save_now()
+            self.destroy()
         except Exception:
             pass
-        self._alarm.stop()
         self.get_application().quit()
 
     def on_draw(self, area: Gtk.DrawingArea, cr: cairo.Context, width: int, height: int, user_data=None) -> None:
@@ -4868,6 +5005,13 @@ class MainWindow(Gtk.Window):
                 grad.add_color_stop_rgba(1.0, 1.0, 1.0, 1.0, 0.0)
                 cr.set_source(lyrics_group)
                 cr.mask(grad)
+        except Exception:
+            if has_fade:
+                try:
+                    cr.pop_group()
+                except Exception:
+                    pass
+            raise
         finally:
             cr.restore()
 
@@ -5789,29 +5933,35 @@ class MainWindow(Gtk.Window):
             cr.rectangle(px + 20.0, ny, content_w + 4.0, avail_h)
             cr.clip()
 
-            y_cursor = ny - self._update_scroll.value
-            total_notes_h = 0.0
-            for note in self._updater.notes:
-                layout = PangoCairo.create_layout(cr)
-                markup_text = f"• {markdown_to_pango_markup(note)}"
-                layout.set_markup(markup_text)
+            cache_key = (id(self._updater.notes), int(content_w), round(Settings.text_factor(), 2))
+            if getattr(self, "_cached_update_key", None) != cache_key:
+                self._cached_update_key = cache_key
+                layouts = []
+                total_h = 0.0
                 font_desc = Pango.FontDescription(f"Sans {11.5 * Settings.text_factor():.1f}")
-                layout.set_font_description(font_desc)
-                layout.set_width(int(content_w * Pango.SCALE))
-                layout.set_wrap(Pango.WrapMode.WORD_CHAR)
+                for note in self._updater.notes:
+                    layout = PangoCairo.create_layout(cr)
+                    markup_text = f"• {markdown_to_pango_markup(note)}"
+                    layout.set_markup(markup_text)
+                    layout.set_font_description(font_desc)
+                    layout.set_width(int(content_w * Pango.SCALE))
+                    layout.set_wrap(Pango.WrapMode.WORD_CHAR)
+                    _, l_h = layout.get_pixel_size()
+                    layouts.append((layout, l_h))
+                    total_h += l_h + 6.0
+                self._cached_update_layouts = layouts
+                self._update_total_h = total_h
 
-                _, l_h = layout.get_pixel_size()
+            y_cursor = ny - self._update_scroll.value
+            for layout, l_h in getattr(self, "_cached_update_layouts", []):
                 if y_cursor + l_h > ny and y_cursor < ny + avail_h:
                     cr.save()
                     cr.translate(px + 22.0, y_cursor)
                     cr.set_source_rgba(1.0, 1.0, 1.0, 0.9 * alpha)
                     PangoCairo.show_layout(cr, layout)
                     cr.restore()
-
                 y_cursor += l_h + 6.0
-                total_notes_h += l_h + 6.0
 
-            self._update_total_h = total_notes_h
             cr.restore()
 
             if total_notes_h > avail_h:

@@ -74,6 +74,18 @@ class LyricsService:
         self._callbacks: list[Callable[[], None]] = []
         self._changed_handler: Callable[[], None] | None = None
 
+    def _put_cache(self, key: str, val: list[Candidate]) -> None:
+        self._cache[key] = val
+        if len(self._cache) > 50:
+            old_k = next(iter(self._cache))
+            del self._cache[old_k]
+
+    def clear_cache(self) -> None:
+        with self._lock:
+            self._cache.clear()
+            self._candidates.clear()
+            self._stretched.clear()
+
     @property
     def synced_lrc(self) -> str:
         with self._lock:
@@ -274,7 +286,7 @@ class LyricsService:
             cached_candidates, cached_synced, cached_plain = cached
             with self._lock:
                 if version == self._version:
-                    self._cache[key] = cached_candidates
+                    self._put_cache(key, cached_candidates)
                     self._candidates = cached_candidates
                     self._synced_lrc = cached_synced
                     self._plain_lyrics = cached_plain
@@ -310,7 +322,7 @@ class LyricsService:
         if cached is not None:
             cached_candidates, cached_synced, cached_plain = cached
             with self._lock:
-                self._cache[key] = cached_candidates
+                self._put_cache(key, cached_candidates)
                 self._key = key
                 self._candidates = cached_candidates
                 self._synced_lrc = cached_synced
@@ -324,7 +336,7 @@ class LyricsService:
 
         found, synced_lrc, plain_lyrics = self._fetch_with_raw(clean_t, clean_a, duration)
         with self._lock:
-            self._cache[key] = found
+            self._put_cache(key, found)
             self._key = key
             self._candidates = found
             self._synced_lrc = synced_lrc
@@ -433,7 +445,7 @@ class LyricsService:
             logger.debug("Lyrics fetch error for %r by %r: %s", title, artist, exc)
 
         with self._lock:
-            self._cache[key] = found
+            self._put_cache(key, found)
             if version != self._version:
                 return
             self._candidates = found

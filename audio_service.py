@@ -63,6 +63,8 @@ class AudioService:
         self._last_app_streams_time: float = 0.0
         self._app_streams_ttl: float = 0.5
         self._pending_app_volumes: dict[int, tuple[float, bool]] = {}
+        self._querying_app_streams: bool = False
+        self._ensuring: bool = False
 
         self._running: bool = True
         self._apply_thread: Optional[threading.Thread] = None
@@ -294,21 +296,36 @@ class AudioService:
     def list_app_streams(self, force: bool = False) -> list[dict]:
         now = time.monotonic()
         with self._lock:
-            if not force and (now - self._last_app_streams_time < self._app_streams_ttl):
-                return self._cached_app_streams
+            cached = list(self._cached_app_streams)
+            is_stale = force or (now - self._last_app_streams_time >= self._app_streams_ttl)
+            if not is_stale or self._querying_app_streams:
+                return cached
+            self._querying_app_streams = True
 
-        streams = self._query_app_streams_raw()
-        with self._lock:
-            for s in streams:
-                idx = s["index"]
-                if idx in self._pending_app_volumes:
-                    pending_vol, pending_unmute = self._pending_app_volumes[idx]
-                    s["volume"] = pending_vol
-                    if pending_unmute:
-                        s["mute"] = False
-            self._cached_app_streams = streams
-            self._last_app_streams_time = time.monotonic()
-            return self._cached_app_streams
+        def _worker():
+            try:
+                streams = self._query_app_streams_raw()
+                with self._lock:
+                    for s in streams:
+                        idx = s["index"]
+                        if idx in self._pending_app_volumes:
+                            pending_vol, pending_unmute = self._pending_app_volumes[idx]
+                            s["volume"] = pending_vol
+                            if pending_unmute:
+                                s["mute"] = False
+                    self._cached_app_streams = streams
+                    self._last_app_streams_time = time.monotonic()
+            finally:
+                with self._lock:
+                    self._querying_app_streams = False
+
+        if not cached:
+            _worker()
+            with self._lock:
+                return list(self._cached_app_streams)
+        else:
+            threading.Thread(target=_worker, daemon=True, name="AppStreamsWorker").start()
+            return cached
 
     def _query_app_streams_raw(self) -> list[dict]:
         if self._has_pactl:
@@ -674,7 +691,14 @@ class AudioService:
 
     def take_switch(self) -> tuple[bool, Optional[AudioDevice]]:
         if not (self._monitor_thread and self._monitor_thread.is_alive()):
-            self.ensure()
+            if not self._ensuring:
+                self._ensuring = True
+                def _ensure_worker():
+                    try:
+                        self.ensure()
+                    finally:
+                        self._ensuring = False
+                threading.Thread(target=_ensure_worker, daemon=True, name="AudioEnsureWorker").start()
         with self._lock:
             if self._switched is not None:
                 dev = self._switched
